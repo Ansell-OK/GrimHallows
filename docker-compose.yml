@@ -1,0 +1,34 @@
+# Local infrastructure for GrimHallow development.
+#
+# Postgres only. The Stacks devnet is run separately by `clarinet devnet start`,
+# which manages its own containers (see README "Local devnet" for the Docker
+# Engine 29 caveat).
+#
+#   docker compose up -d
+#   docker compose down          # keeps data
+#   docker compose down -v       # wipes data
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: grimhallow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: grimhallow
+      POSTGRES_PASSWORD: grimhallow
+      POSTGRES_DB: grimhallow
+    ports:
+      # Matches DATABASE_URL in .env.example. 5432 is also the devnet Postgres
+      # port, but clarinet devnet is not running at the same time as this in
+      # normal use; change the host port here if you need both at once.
+      - '5432:5432'
+    volumes:
+      - grimhallow-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U grimhallow -d grimhallow']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  grimhallow-pgdata:

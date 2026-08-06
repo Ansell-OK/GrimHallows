@@ -1,0 +1,22 @@
+@import "tailwindcss";
+
+@theme {
+  --color-obsidian: #0B0D10;
+  --color-stone: #1B1E22;
+  --color-blood: #7A1018;
+  --color-void: #6B2FA0;
+  --color-rot: #2E7A3B;
+  --color-gold: #C7A486;
+  --color-stx-accent: #21D4B8;
+
+  --font-display: "Cinzel Decorative", serif;
+  --font-ui: "Inter", sans-serif;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-obsidian);
+    color: #e5e7eb;
+    font-family: var(--font-ui);
+  }
+}

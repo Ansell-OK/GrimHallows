@@ -1,0 +1,25 @@
+{
+  "name": "@grimhallow/shared",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Shared types + versioned pure functions (stat derivation, dice derivation) used by both the API and any verification tooling.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./stats": "./src/stats.ts",
+    "./dice": "./src/dice.ts",
+    "./contracts": "./src/contracts.ts",
+    "./types": "./src/types.ts"
+  },
+  "scripts": {
+    "lint": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@noble/hashes": "1.7.1"
+  },
+  "devDependencies": {
+    "typescript": "~5.8.2",
+    "vitest": "^3.0.5"
+  }
+}

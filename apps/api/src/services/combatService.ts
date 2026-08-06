@@ -1,0 +1,247 @@
+/**
+ * Combat service — 04-backend-api-spec.md#5.
+ *
+ * The public face of a run. Routes call this; this calls the oracle. The layer
+ * exists so that no route holds a reference to the module that holds the signing
+ * key, and so that everything crossing back out to a client is a *derived*
+ * value — turns, HP, whose turn it is — rather than the seed those values came
+ * from.
+ *
+ * What it adds on top of the oracle:
+ *
+ *   - building an encounter setup from a run's character, which is the one part
+ *     that needs the chain (NFT metadata feeds derived stats);
+ *   - shaping `RunResponse` / `ActionResponse` exactly as the spec and the web
+ *     app expect them, including holding the seed back until the run resolves.
+ */
+
+import {
+  DICE_ALGO_VERSION,
+  ENCOUNTER_ALGO_VERSION,
+  STATS_ALGO_VERSION,
+  deriveCharacter as deriveCharacterCore,
+  drawLootTier,
+  isSupportedCollection,
+  lootUriForTier,
+  type ActionResponse,
+  type EncounterSetup,
+  type PlayerAction,
+  type RewardResult,
+  type RunResponse,
+  type VerificationData,
+} from '@grimhallow/shared';
+import type { RunOracle, RunView } from '../oracle/runOracle.js';
+import type { CharacterRef, RunRecord } from '../repos/runs.js';
+import type { ChainClient } from '../lib/hiro.js';
+import type { CharacterMintService } from './characterMintService.js';
+import { UNKNOWN_HOLDER_AGE, type HolderAgeService } from './holderAgeService.js';
+
+/**
+ * The solo party member's combatant id.
+ *
+ * `p0` because the encounter engine derives initiative from a combatant's
+ * position, and position must be stable across replays. A party run numbers
+ * members `p0..p3` in join order for the same reason.
+ */
+export const SOLO_COMBATANT_ID = 'p0';
+
+export interface CombatServiceDeps {
+  readonly oracle: RunOracle;
+  readonly chain: ChainClient;
+  /**
+   * Optional so existing tests that only exercise the oracle path need no
+   * holder-age plumbing. Absent means every character fights at holdDays 0 —
+   * an underestimate, which is the safe direction (see holderAgeService.ts).
+   */
+  readonly holderAge?: HolderAgeService;
+  /**
+   * Resolves the on-chain class of our own `character-nft` tokens.
+   *
+   * Not optional in the same forgiving way the others are: since the curated
+   * collection delta, a minted character has NO class outside this lookup — it
+   * is deliberately absent from the allowlist — so without this dependency
+   * `buildSetup` throws for exactly the characters players paid us for. Left
+   * optional only so tests fielding a curated-collection token need not stub a
+   * contract read they never reach.
+   */
+  readonly characterMint?: CharacterMintService;
+}
+
+export class CombatService {
+  constructor(private readonly deps: CombatServiceDeps) {}
+
+  /**
+   * Build the encounter inputs for a run, reading metadata from chain.
+   *
+   * Called once, at entry, and the result is frozen onto the run by the oracle's
+   * commit. Never called again: metadata can change after a run starts, and
+   * rebuilding the setup later would replay a different fight from the one the
+   * player actually played.
+   *
+   * `powerUpTiers` is the equipped set, frozen at entry. Each tier grants a
+   * dice-formula upgrade and defense bonus, and the list is persisted in the
+   * setup so a verifier can reproduce the exact damage rolls this character
+   * dealt — `applyPowerUps(base, tiers)` is deterministic, but only if you know
+   * which tiers were active.
+   */
+  async buildSetup(
+    run: RunRecord,
+    monsterTableId: string,
+    character: CharacterRef,
+    powerUpTiers: readonly number[],
+    displayName?: string,
+  ): Promise<EncounterSetup> {
+    const metadata = await this.deps.chain
+      .getTokenMetadata(character.contractId, character.tokenId)
+      .catch(() => null);
+
+    // Frozen onto the run alongside everything else in the setup. Rarity moves
+    // with the calendar, so reading it again mid-run would strengthen a
+    // character partway through a fight it had already started.
+    const age = this.deps.holderAge
+      ? await this.deps.holderAge
+          .forToken(run.createdBy, character.contractId, character.tokenId)
+          .catch(() => UNKNOWN_HOLDER_AGE)
+      : UNKNOWN_HOLDER_AGE;
+
+    // A curated-collection token gets its class from the allowlist and costs no
+    // chain call. Anything else that got this far can only be one of our own
+    // mints, whose class lives on chain — so that is the one case worth reading.
+    const mintedClassId = isSupportedCollection(character.contractId)
+      ? null
+      : await (this.deps.characterMint?.mintedClass(character.tokenId) ?? Promise.resolve(null));
+
+    const derived = deriveCharacterCore({
+      contractId: character.contractId,
+      tokenId: character.tokenId,
+      metadata,
+      holdDays: age.holdDays,
+      mintedClassId,
+    });
+
+    return {
+      monsterTableId,
+      party: [
+        {
+          id: SOLO_COMBATANT_ID,
+          address: run.createdBy,
+          name: displayName?.trim() || metadata?.name?.trim() || `Character #${character.tokenId}`,
+          charClass: derived.classId,
+          stats: derived.stats,
+          powerUpTiers,
+        },
+      ],
+    };
+  }
+
+  async get(runId: string): Promise<RunResponse | null> {
+    const view = await this.deps.oracle.view(runId);
+    return view ? toRunResponse(view) : null;
+  }
+
+  async submitAction(
+    runId: string,
+    address: string,
+    action: PlayerAction,
+  ): Promise<ActionResponse> {
+    const before = await this.deps.oracle.view(runId);
+    const alreadyLogged = before?.turns.length ?? 0;
+    const after = await this.deps.oracle.submitAction(runId, address, action);
+
+    return {
+      runId,
+      // Only the turns this submission caused. One action can produce several —
+      // the player's own turn plus every monster that acts before their next one
+      // — and the client animates exactly those rather than replaying the fight.
+      turns: after.turns.slice(alreadyLogged),
+      encounter: after.encounter,
+      state: after.run.state,
+      combatOutcome: after.run.combatOutcome,
+    };
+  }
+}
+
+/**
+ * Everything a skeptical player needs to recompute the run.
+ *
+ * Takes the whole view rather than just the record because verification needs
+ * the action list too: `runEncounter(seed, setup, actions)` is the function to
+ * re-run, and handing over a signature without its inputs would be asking to be
+ * trusted rather than checked.
+ */
+export function toVerification(view: RunView): VerificationData {
+  const run = view.run;
+  const actions: PlayerAction[] = view.actions.map((a) => ({
+    powerId: a.powerId,
+    targetId: a.targetId,
+  }));
+
+  return {
+    // Held back until the run resolves. `RunRecord.seedReveal` is only populated
+    // at that point, so this is the read that stays honest by construction
+    // rather than by remembering to check the state here.
+    seed: run.seedReveal,
+    seedHash: run.seedHash ?? '',
+    commitTxId: run.commitTxId,
+    resolveTxId: run.resolveTxId,
+    oracleAddress: run.oracleAddress,
+    commitSignature: run.commitSignature,
+    resolveSignature: run.resolveSignature,
+    committedAt: run.committedAt?.toISOString() ?? null,
+    resolvedAt: run.resolvedAt?.toISOString() ?? null,
+    // Only meaningful once there is a resolve statement to check it against.
+    // Before that it would fingerprint a transcript still being written. The
+    // hash comes from the oracle rather than being recomputed here, so there is
+    // one implementation of "what was signed".
+    transcriptHash: run.resolveSignature ? view.transcriptHash : null,
+    diceAlgoVersion: DICE_ALGO_VERSION,
+    encounterAlgoVersion: ENCOUNTER_ALGO_VERSION,
+    statsAlgoVersion: STATS_ALGO_VERSION,
+    setup: run.setup,
+    actions,
+  };
+}
+
+export function toRunResponse(view: RunView): RunResponse {
+  return {
+    runId: view.run.id,
+    dungeonType: view.run.dungeonType,
+    state: view.run.state,
+    combatOutcome: view.run.combatOutcome,
+    turns: view.turns,
+    encounter: view.encounter,
+    reward: toRewardResult(view.run),
+    verification: toVerification(view),
+  };
+}
+
+/**
+ * The stored reward, widened back to the shape the client and the verifier share.
+ *
+ * `runs` keeps what only the chain can tell us — the kind, the amount, the token
+ * id the mint assigned, and whether a jackpot was degraded. It does not keep the
+ * loot *tier* or its metadata URI, because both are functions of the revealed
+ * seed: `drawLootTier(seed)` returns the same tier on the ordinary path and on
+ * the degrade path, so re-deriving them here reads the same table the resolve
+ * used rather than duplicating it. A column would be a second copy of a value
+ * the seed already fixes, free to drift from it.
+ *
+ * Null for a free run (no table was consulted) and for an unresolved one. Tier
+ * and URI stay null if the seed is somehow absent — an unknown tier is reported
+ * as unknown rather than guessed at.
+ */
+function toRewardResult(run: RunRecord): RewardResult | null {
+  const reward = run.reward;
+  if (!reward) return null;
+
+  const tier =
+    reward.kind === 'loot' && run.seedReveal ? drawLootTier(run.seedReveal) : null;
+
+  return {
+    kind: reward.kind,
+    amountUstx: reward.amountUstx,
+    lootUri: tier === null ? null : lootUriForTier(tier),
+    tier,
+    degraded: reward.degraded,
+  };
+}

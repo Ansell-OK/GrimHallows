@@ -1,0 +1,505 @@
+/**
+ * Fastify server entrypoint.
+ *
+ * The backend is the oracle + convenience layer, never the source of truth for
+ * money or ownership (04-backend-api-spec.md#intro). Dependencies are injected
+ * rather than imported by each route so tests can drive the real routes against
+ * in-memory doubles — no live chain, no live database, same code path.
+ */
+
+import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
+import cors from '@fastify/cors';
+import { pathToFileURL } from 'node:url';
+import {
+  CONTRACT_NAMES,
+  UnsupportedCollectionError,
+  contractId,
+  type NetworkConfig,
+} from '@grimhallow/shared';
+import { config, loadOracleKey, ownerAddressOrNull } from './config.js';
+import { ApiError } from './lib/errors.js';
+import { HiroChainClient, type ChainClient } from './lib/hiro.js';
+import { StacksOracleSigner, type OracleSigner } from './oracle/attestation.js';
+import { PaidRunOracle } from './oracle/paidRunOracle.js';
+import { RunOracle } from './oracle/runOracle.js';
+import {
+  MemoryAuthStore,
+  PostgresAuthStore,
+  type AuthStore,
+} from './repos/auth.js';
+import {
+  NullCharacterCache,
+  PostgresCharacterCache,
+  type CharacterCache,
+} from './repos/characters.js';
+import {
+  NullHolderAgeRepo,
+  PostgresHolderAgeRepo,
+  type HolderAgeRepo,
+} from './repos/holderAge.js';
+import {
+  MemoryForgeHistoryStore,
+  PostgresForgeHistoryStore,
+  type ForgeHistoryStore,
+} from './repos/forgeHistory.js';
+import {
+  MemoryPlayerStatsStore,
+  PostgresPlayerStatsStore,
+  type PlayerStatsStore,
+} from './repos/playerStats.js';
+import { MemoryRunStore, PostgresRunStore, type RunStore } from './repos/runs.js';
+import { MemorySpawnStore, PostgresSpawnStore, type SpawnStore } from './repos/spawns.js';
+import { Indexer } from './indexer/indexer.js';
+import { DEFAULT_INDEXER_CONFIG, IndexerLoop, type IndexerLoopConfig } from './indexer/loop.js';
+import { OnDemandTicker } from './services/onDemand.js';
+import { CharacterMintService } from './services/characterMintService.js';
+import { CharacterService } from './services/characterService.js';
+import { CombatService } from './services/combatService.js';
+import { HolderAgeService } from './services/holderAgeService.js';
+import { ForgeService } from './services/forgeService.js';
+import { MapService } from './services/mapService.js';
+import { PaidEntryService } from './services/paidEntryService.js';
+import { PowerUpService } from './services/powerUpService.js';
+import { DEFAULT_SPAWNER_CONFIG, DungeonSpawner, type SpawnerConfig } from './services/spawner.js';
+import { registerAuthRoutes } from './routes/auth.js';
+import { registerAdminRoutes } from './routes/admin.js';
+import { registerCharacterRoutes } from './routes/characters.js';
+import { registerDungeonRoutes } from './routes/dungeons.js';
+import { registerForgeRoutes } from './routes/forge.js';
+import { registerLeaderboardRoutes } from './routes/leaderboard.js';
+import { registerMapRoutes } from './routes/map.js';
+import { registerPaidClaimRoutes } from './routes/paidDungeonClaim.js';
+import { registerRunRoutes } from './routes/runs.js';
+
+export interface ServerDeps {
+  readonly chain?: ChainClient;
+  readonly authStore?: AuthStore;
+  readonly characterCache?: CharacterCache;
+  readonly holderAgeRepo?: HolderAgeRepo;
+  readonly spawnStore?: SpawnStore;
+  readonly runStore?: RunStore;
+  readonly forgeHistoryStore?: ForgeHistoryStore;
+  readonly playerStatsStore?: PlayerStatsStore;
+  /**
+   * The oracle's signing capability. Injected in tests so the combat loop can be
+   * exercised without a real key on disk; loaded from `ORACLE_PRIVATE_KEY`
+   * otherwise. This is the only wallet the backend ever signs with, besides the
+   * separately-held owner key.
+   */
+  readonly oracleSigner?: OracleSigner;
+  /**
+   * The oracle's private key, used by `PaidRunOracle` to sign transactions.
+   * Injected in tests alongside `oracleSigner`; loaded from `ORACLE_PRIVATE_KEY`
+   * otherwise. When both the signer and the key are injected, they must agree.
+   */
+  readonly oraclePrivateKey?: string;
+  /**
+   * Settles paid runs on chain. Injected in tests so the claim and combat paths
+   * can be driven without building and fee-estimating a real transaction, which
+   * would need a live node. Built from `oraclePrivateKey` otherwise.
+   */
+  readonly paidOracle?: PaidRunOracle;
+  readonly stacks?: NetworkConfig;
+  readonly jwtSecret?: string;
+  /**
+   * The operator's principal, gating `/admin/*`. Falls back to `OWNER_ADDRESS`,
+   * and when neither is set the admin surface refuses every request rather than
+   * accepting any session as the owner.
+   */
+  readonly ownerAddress?: string | null;
+  readonly logger?: boolean;
+  /**
+   * Run the free-dungeon spawner in-process. Off by default so tests control
+   * spawn state exactly; `npm run dev` and production turn it on.
+   */
+  readonly spawner?: boolean | Partial<SpawnerConfig>;
+  /**
+   * Run the chain-event indexer in-process.
+   *
+   * Off by default for the same reason as the spawner — a test wants to call
+   * `runOnce()` when it chooses, not have a timer rewrite `player_stats`
+   * underneath its assertions. `npm run dev` and production turn it on.
+   */
+  readonly indexer?: boolean | Partial<IndexerLoopConfig>;
+  /**
+   * Drive the spawner and indexer from reads instead of timers.
+   *
+   * For serverless, where `deps.spawner`/`deps.indexer` are not merely wasteful
+   * but inert: the platform freezes a function once it responds, so a
+   * `setInterval` scheduled during one request never fires again. With this on,
+   * `GET /map` tops up spawns and `GET /leaderboard` refreshes ranks, each
+   * throttled to the interval its timer would have used. See services/onDemand.ts
+   * for what that trades away.
+   *
+   * Mutually exclusive with the timer flags — when this is set the timers stay
+   * off, so the two never stack.
+   */
+  readonly onDemand?: boolean;
+}
+
+export async function buildServer(deps: ServerDeps = {}): Promise<FastifyInstance> {
+  const app = Fastify({
+    logger: deps.logger === false
+      ? false
+      : {
+          level: process.env.LOG_LEVEL ?? 'info',
+          // Never log signing keys or seeds-before-reveal.
+          redact: [
+            'req.headers.authorization',
+            '*.privateKey',
+            '*.seed',
+            '*.signature',
+          ],
+        },
+  });
+
+  await app.register(cors, { origin: config.webOrigins, credentials: true });
+
+  const stacks = deps.stacks ?? config.stacks;
+  const chain =
+    deps.chain ?? new HiroChainClient(stacks.apiUrl, config.hiroApiKey);
+  // Postgres-backed by default; in-memory when there is no DATABASE_URL, so a
+  // fresh clone can boot and exercise the flow before docker compose is up.
+  const authStore =
+    deps.authStore ?? (config.databaseUrl ? new PostgresAuthStore() : new MemoryAuthStore());
+  const characterCache =
+    deps.characterCache ??
+    (config.databaseUrl ? new PostgresCharacterCache() : new NullCharacterCache());
+  // Without Postgres this degrades to "no cache", not "no rarity": every lookup
+  // goes to Hiro. Correct, just chattier — the null repo is for the fresh-clone
+  // boot path, not for production.
+  const holderAgeRepo =
+    deps.holderAgeRepo ??
+    (config.databaseUrl ? new PostgresHolderAgeRepo() : new NullHolderAgeRepo());
+  const spawnStore =
+    deps.spawnStore ?? (config.databaseUrl ? new PostgresSpawnStore() : new MemorySpawnStore());
+  const runStore =
+    deps.runStore ?? (config.databaseUrl ? new PostgresRunStore() : new MemoryRunStore());
+  const forgeHistoryStore =
+    deps.forgeHistoryStore ??
+    (config.databaseUrl ? new PostgresForgeHistoryStore() : new MemoryForgeHistoryStore());
+  // The in-memory stats store derives from whatever runs exist, which means it
+  // needs the memory run store's `all()` — deliberately not on `RunStore`. When
+  // a caller injects some other RunStore without a DATABASE_URL, there is
+  // nothing to enumerate and the leaderboard is honestly empty rather than
+  // wrong.
+  const playerStatsStore =
+    deps.playerStatsStore ??
+    (config.databaseUrl
+      ? new PostgresPlayerStatsStore()
+      : new MemoryPlayerStatsStore(
+          () => (runStore instanceof MemoryRunStore ? runStore.all() : []),
+          forgeHistoryStore,
+        ));
+
+  const jwtSecret = deps.jwtSecret ?? config.jwtSecret;
+  if (!jwtSecret) {
+    // Refuse rather than fall back to a default secret: a predictable signing
+    // key would let anyone mint a session for any address.
+    throw new Error('JWT_SECRET is not set — refusing to start with unsigned sessions.');
+  }
+
+  // Same reasoning, one step further: an ephemeral or default oracle key would
+  // produce attestations that stop verifying the moment the process restarts,
+  // which is worse than none at all — a player would be handed a signature that
+  // looks checkable and isn't.
+  const oracleSigner =
+    deps.oracleSigner ?? new StacksOracleSigner(loadOracleKey(), config.network);
+
+  const oraclePrivateKey = deps.oraclePrivateKey ?? loadOracleKey();
+
+  // Separate oracle for paid runs. Uses the same key as the free oracle but
+  // calls different contract functions: `commit-seed` and `reveal-and-resolve`
+  // rather than off-chain signatures. Kept as a distinct object so the one that
+  // can move sponsor-pool funds stays unreachable from player-facing routes.
+  const paidOracle =
+    deps.paidOracle ??
+    new PaidRunOracle({
+      chain,
+      stacks,
+      oraclePrivateKey,
+      log: (message, detail) => app.log.info(detail ?? {}, message),
+    });
+
+  const oracle = new RunOracle({
+    runs: runStore,
+    signer: oracleSigner,
+    paidOracle,
+    log: (message, detail) => app.log.info(detail ?? {}, message),
+  });
+
+  // One HolderAgeService for both the character list and combat setup, so a
+  // character's rarity on its card and its stats in a fight come from the same
+  // cached answer rather than two lookups that could disagree.
+  const holderAge = new HolderAgeService({ chain, repo: holderAgeRepo });
+
+  // One CharacterMintService for the shop routes, the character list's class
+  // lookup, and combat setup. All three ask the same contract the same question
+  // — what class was this token minted as, and what does one cost — and two
+  // readers would be two chances to answer differently. Built before `combat`
+  // because a minted character has no class without it: our own collection is
+  // deliberately not in the curated allowlist.
+  const characterMint = new CharacterMintService({
+    chain,
+    stacks,
+    log: (message, detail) => app.log.info(detail ?? {}, message),
+  });
+
+  const combat = new CombatService({ oracle, chain, holderAge, characterMint });
+
+  // One PowerUpService for every route that reads or verifies a loadout: the
+  // inventory listing, a free entry and a paid claim must never disagree about
+  // what the wallet holds or what tier a token is. Same reasoning as `map`
+  // below — these are chain reads, and two readers is two answers.
+  const powerUps = new PowerUpService({
+    chain,
+    stacks,
+    log: (message, detail) => app.log.info(detail ?? {}, message),
+  });
+
+  app.get('/health', async () => ({ status: 'ok', network: config.network }));
+
+  /**
+   * Contract addresses the web app should use. Served from the shared config so
+   * addresses have exactly one source of truth (Phase 1 requirement).
+   */
+  app.get('/config', async () => ({
+    network: config.network,
+    explorerUrl: stacks.explorerUrl,
+    contracts: Object.fromEntries(
+      (Object.keys(CONTRACT_NAMES) as (keyof typeof CONTRACT_NAMES)[]).map((k) => [
+        k,
+        contractId(stacks, k),
+      ]),
+    ),
+  }));
+
+  await registerAuthRoutes(app, {
+    store: authStore,
+    network: config.network,
+    jwtSecret,
+  });
+
+  await registerCharacterRoutes(app, {
+    characters: new CharacterService({
+      chain,
+      cache: characterCache,
+      stacks,
+      holderAge,
+      characterMint,
+    }),
+    powerUps,
+    characterMint,
+    stacks,
+    jwtSecret,
+  });
+
+  // One MapService for every route that needs a live gate fee or pool balance:
+  // the map, a paid-entry quote, and an owner top-up must never disagree about
+  // what the chain currently says.
+  const map = new MapService({
+    chain,
+    spawns: spawnStore,
+    stacks,
+    log: (message, detail) => app.log.warn(detail ?? {}, message),
+  });
+
+  await registerMapRoutes(app, { map });
+
+  // One ForgeService for the player-facing route and for the indexer's recipe
+  // mirror. Two readers of `get-recipe` would be two chances to map a tier
+  // differently, and the tier is what `highestForgeTier` scores.
+  const forge = new ForgeService({
+    chain,
+    stacks,
+    log: (message, detail) => app.log.info(detail ?? {}, message),
+  });
+
+  await registerForgeRoutes(app, { forge, stacks, jwtSecret });
+
+  await registerLeaderboardRoutes(app, { playerStats: playerStatsStore });
+
+  await registerDungeonRoutes(app, {
+    spawns: spawnStore,
+    runs: runStore,
+    oracle,
+    combat,
+    map,
+    powerUps,
+    stacks,
+    jwtSecret,
+  });
+
+  const paidEntry = new PaidEntryService({
+    chain,
+    runs: runStore,
+    oracle: paidOracle,
+    combat,
+    powerUps,
+    stacks,
+    log: (message, detail) => app.log.info(detail ?? {}, message),
+  });
+
+  await registerPaidClaimRoutes(app, {
+    paidEntry,
+    oracle,
+    powerUps,
+    jwtSecret,
+  });
+
+  await registerAdminRoutes(app, {
+    ownerAddress: deps.ownerAddress ?? ownerAddressOrNull(),
+    map,
+    stacks,
+    jwtSecret,
+  });
+
+  await registerRunRoutes(app, {
+    combat,
+    runs: runStore,
+    jwtSecret,
+  });
+
+  // Background content jobs, and the two ways to drive them.
+  //
+  // Timers (`deps.spawner` / `deps.indexer`) are what `npm run dev` and any
+  // long-running host use: the job runs whether or not anyone is looking.
+  // Read-triggered (`deps.onDemand`) is what serverless uses, because a timer
+  // there is silently inert. Exactly one applies, so a deployment cannot end up
+  // running every pass twice.
+  //
+  // Both jobs are built here when either mode wants them. Neither touches money:
+  // one invents map content, the other recomputes a leaderboard cache from chain
+  // history. Nothing that must happen on a schedule regardless of traffic — a
+  // settlement, an attestation, a payout — may be attached to either.
+  const spawner =
+    deps.spawner || deps.onDemand
+      ? new DungeonSpawner({
+          spawns: spawnStore,
+          config: typeof deps.spawner === 'object' ? deps.spawner : undefined,
+          log: (message, detail) => app.log.info(detail ?? {}, message),
+        })
+      : null;
+
+  const indexer =
+    deps.indexer || deps.onDemand
+      ? new Indexer({
+          chain,
+          stacks,
+          runs: runStore,
+          forgeHistory: forgeHistoryStore,
+          playerStats: playerStatsStore,
+          forge,
+          log: (message, detail) => app.log.info(detail ?? {}, message),
+        })
+      : null;
+
+  if (deps.onDemand) {
+    const log = (message: string, detail?: Record<string, unknown>) =>
+      app.log.info(detail ?? {}, message);
+
+    // Same intervals the timers would have used, so switching hosts changes
+    // where the work is triggered from and not how often it happens.
+    const spawnTicker = new OnDemandTicker({
+      name: 'spawner',
+      tick: () => spawner!.tick(),
+      minIntervalMs: DEFAULT_SPAWNER_CONFIG.tickIntervalMs,
+      log,
+    });
+    const indexTicker = new OnDemandTicker({
+      name: 'indexer',
+      tick: () => indexer!.runOnce(),
+      minIntervalMs: DEFAULT_INDEXER_CONFIG.tickIntervalMs,
+      log,
+    });
+
+    app.addHook('onRequest', async (request) => {
+      switch (request.routeOptions.url) {
+        case '/map':
+          // Awaited. The response *is* the spawn list this pass tops up, so
+          // firing and forgetting would show the thin map to the one visitor who
+          // triggered the refill and the full one to whoever came next.
+          await spawnTicker.runIfDue();
+          break;
+        case '/leaderboard':
+          // Not awaited. A pass walks chain history over the network and can take
+          // seconds; the response already carries `computedAt`, so a reader who
+          // arrives mid-pass gets openly-stamped stale ranks rather than a slow
+          // request. Staleness is disclosed here, latency would not be.
+          indexTicker.startIfDue();
+          break;
+      }
+    });
+  } else {
+    if (spawner) {
+      spawner.start();
+      // Tied to the server's lifecycle so a closed test server leaves no timer.
+      app.addHook('onClose', async () => spawner.stop());
+    }
+
+    if (indexer) {
+      const loop = new IndexerLoop(
+        indexer,
+        typeof deps.indexer === 'object' ? deps.indexer : undefined,
+        (message, detail) => app.log.info(detail ?? {}, message),
+      );
+      loop.start();
+      app.addHook('onClose', async () => loop.stop());
+    }
+  }
+
+  app.setErrorHandler((err: FastifyError, _req, reply) => {
+    if (err instanceof ApiError) {
+      // Expected, caller-facing failures: log at warn, return the spec'd shape.
+      app.log.warn({ code: err.code, message: err.message }, 'request rejected');
+      reply.status(err.statusCode).send(err.toJSON());
+      return;
+    }
+
+    // A token that is not from a supported collection is a bad request, not a
+    // server fault: the caller named an NFT that is not a playable character.
+    // Mapped centrally rather than at each call site because every path that
+    // derives a character can raise it, and a 500 here would read as "we broke"
+    // when the honest answer is "that is not a character".
+    if (err instanceof UnsupportedCollectionError) {
+      app.log.warn(
+        { contractId: err.contractId, tokenId: err.tokenId },
+        'unsupported collection rejected',
+      );
+      reply.status(400).send({
+        error: { code: 'UNSUPPORTED_COLLECTION', message: err.message },
+      });
+      return;
+    }
+
+    app.log.error(err);
+    const status = err.statusCode ?? 500;
+    reply.status(status).send({
+      error: {
+        code: err.code ?? 'INTERNAL_ERROR',
+        message: status >= 500 ? 'Internal server error' : err.message,
+      },
+    });
+  });
+
+  app.setNotFoundHandler((_req, reply) => {
+    reply.status(404).send({ error: { code: 'NOT_FOUND', message: 'Route not found' } });
+  });
+
+  return app;
+}
+
+// Windows paths and file:// URLs don't compare directly, so normalise through
+// pathToFileURL rather than string-matching.
+const isMain =
+  !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isMain) {
+  const app = await buildServer({ spawner: true, indexer: true });
+  try {
+    await app.listen({ port: config.port, host: config.host });
+  } catch (err) {
+    app.log.error(err);
+    process.exit(1);
+  }
+}

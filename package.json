@@ -1,0 +1,32 @@
+{
+  "name": "grimhallow",
+  "private": true,
+  "version": "0.1.0",
+  "description": "GrimHallow — co-op turn-based dungeon crawler on Stacks",
+  "workspaces": [
+    "apps/web",
+    "apps/api",
+    "packages/shared"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev --workspace @grimhallow/web",
+    "dev:api": "npm run dev --workspace @grimhallow/api",
+    "build": "npm run build --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "test:contracts": "npm --prefix contracts test",
+    "test:all": "npm run test && npm run test:contracts",
+    "check:contracts": "clarinet check --manifest-path contracts/Clarinet.toml",
+    "devnet": "clarinet devnet start --manifest-path contracts/Clarinet.toml",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:check": "node scripts/check-db.mjs",
+    "db:migrate": "node scripts/db-migrate.mjs",
+    "seed": "tsx scripts/seed-contracts.mjs",
+    "verify-seed": "tsx scripts/verify-seed.mjs",
+    "fund-pool": "tsx scripts/fund-pool.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

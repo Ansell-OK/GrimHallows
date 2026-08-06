@@ -1,0 +1,62 @@
+[project]
+name = "grimhallow"
+description = "GrimHallow - character-loot-nft, game-core, forge"
+authors = []
+telemetry = false
+cache_dir = "./.cache"
+
+# clarity_version is pinned explicitly rather than left to `epoch = "latest"`:
+# with epoch alone this Clarinet build resolves to a Clarity version that does
+# not recognise `as-contract`. 3 is what Stacks testnet and mainnet run.
+
+[contracts.sip009-nft-trait]
+path = "contracts/sip009-nft-trait.clar"
+epoch = "latest"
+clarity_version = 3
+
+# Deploy order matters (docs/03-smart-contracts-spec.md section 7):
+# character-loot-nft, then game-core, then forge.
+#
+# character-nft is independent of all three — it never calls them and they never
+# call it — so its position is free. It sits after the loot collection to keep
+# the two SIP-009 collections adjacent.
+
+[contracts.character-loot-nft]
+path = "contracts/character-loot-nft.clar"
+epoch = "latest"
+clarity_version = 3
+
+[contracts.character-nft]
+path = "contracts/character-nft.clar"
+epoch = "latest"
+clarity_version = 3
+
+[contracts.game-core]
+path = "contracts/game-core.clar"
+epoch = "latest"
+clarity_version = 3
+
+[contracts.forge]
+path = "contracts/forge.clar"
+epoch = "latest"
+clarity_version = 3
+
+# forge-v2 supersedes forge (it adds the STX fee; see its header). Both are
+# listed because forge is already deployed on mainnet and immutable — the
+# simnet has to model the same pair the chain has.
+[contracts.forge-v2]
+path = "contracts/forge-v2.clar"
+epoch = "latest"
+clarity_version = 3
+
+# Check-checker settings:
+# trusted_sender: if true, inputs are trusted after tx_sender has been checked.
+# trusted_caller: if true, inputs are trusted after contract-caller has been checked.
+# callee_filter: if true, untrusted data may be passed into a private function without a
+# warning, if it gets checked inside. This check will also propagate up to the
+# caller.
+# More informations: https://www.hiro.so/blog/new-safety-checks-in-clarinet
+
+[repl.analysis]
+passes = ["check_checker"]
+check_checker = { trusted_sender = false, trusted_caller = false, callee_filter = false }

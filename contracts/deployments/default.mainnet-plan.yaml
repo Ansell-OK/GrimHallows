@@ -1,0 +1,60 @@
+# ADDITIVE MAINNET PLAN — publishes ONLY the two contracts that are not yet on chain.
+#
+# `clarinet deployments apply --mainnet` reads this file by default, which is why
+# this file is the additive plan rather than the full six-contract one: the only
+# remaining mainnet publish IS the additive one, and a default that republished
+# live contracts would be a footgun aimed at real STX.
+#
+# ALREADY ON CHAIN as of 2026-08-05, block 8704492 — never re-publish these:
+#   SP1MNXD30JHNT2Y0P8KZ06J43ACCH27N3BTBZ90AR.sip009-nft-trait
+#   SP1MNXD30JHNT2Y0P8KZ06J43ACCH27N3BTBZ90AR.character-loot-nft
+#   SP1MNXD30JHNT2Y0P8KZ06J43ACCH27N3BTBZ90AR.forge          <- v1, fee-less, intentionally inert
+#   SP1MNXD30JHNT2Y0P8KZ06J43ACCH27N3BTBZ90AR.game-core
+# Clarity contracts are immutable. A republish does not upgrade anything; it
+# fails with ContractAlreadyExists and the deployer still pays the fee.
+#
+# The original four-contract publish plan is kept for the record at
+# `default.mainnet-plan.yaml.original-4-contract-publish.bak`.
+#
+# Costs below are real, computed via `clarinet 3.23.1 deployments generate
+# --mainnet --low-cost` on 2026-08-06 — not carried over from the earlier deploy.
+# Regenerating overwrites this file with all six contracts, so if you regenerate,
+# delete the four above again before applying.
+#
+# ALWAYS pass -d/--use-on-disk-deployment-plan to apply, or clarinet recomputes
+# the plan and silently restores all six.
+#
+# Use clarinet >= 3.23.1. The winget 3.15.1 on PATH cannot parse `epoch: '4.0'`
+# below. Full path:
+#   %LOCALAPPDATA%\GrimHallow\tools\clarinet\clarinet.exe
+#
+# AFTER this applies, in order (03-smart-contracts-spec.md#8):
+#   1. set-minter on character-loot-nft -> forge-v2   (forge-v2 cannot mint until then)
+#   2. generate a SEPARATE oracle key, then set-oracle   (gates the backend)
+#   3. npm run seed -- --dry-run, then npm run seed
+#   4. npm run fund-pool -- <stx> --confirm             (separate and explicit; seeding
+#                                                        deliberately does not fund the pool)
+id: 0
+name: Mainnet deployment (additive — character-nft + forge-v2 only)
+network: mainnet
+stacks-node: https://api.hiro.so
+bitcoin-node: http://blockstack:blockstacksystem@bitcoin.blockstack.com:8332
+plan:
+  batches:
+  - id: 0
+    transactions:
+    - transaction-type: contract-publish
+      contract-name: character-nft
+      expected-sender: SP1MNXD30JHNT2Y0P8KZ06J43ACCH27N3BTBZ90AR
+      cost: 520949
+      path: contracts/character-nft.clar
+      anchor-block-only: true
+      clarity-version: 3
+    - transaction-type: contract-publish
+      contract-name: forge-v2
+      expected-sender: SP1MNXD30JHNT2Y0P8KZ06J43ACCH27N3BTBZ90AR
+      cost: 520919
+      path: contracts/forge-v2.clar
+      anchor-block-only: true
+      clarity-version: 3
+    epoch: '4.0'
