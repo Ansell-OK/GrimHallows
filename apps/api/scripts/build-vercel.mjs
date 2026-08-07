@@ -1,6 +1,16 @@
 #!/usr/bin/env node
 /**
- * Bundle the API into a single Vercel serverless function.
+ * Bundle the API into a single Vercel serverless function, emitted through the
+ * Build Output API (`.vercel/output`).
+ *
+ * WHY BUILD OUTPUT API AND NOT A `functions` GLOB IN vercel.json. `vercel build`
+ * validates a `functions` pattern against the checked-out source *before* it
+ * runs this build command. The bundle that pattern points at is generated here
+ * and is gitignored, so on a clean clone the glob matches nothing and the deploy
+ * aborts before esbuild ever runs — the failure is "doesn't match any Serverless
+ * Functions", seconds into the build, with no install step. Emitting a prebuilt
+ * function under `.vercel/output` instead hands Vercel the finished artifact and
+ * its routing directly: no source inference, nothing to race the build command.
  *
  * WHY A BUNDLE AND NOT A `tsc` BUILD. `@grimhallow/shared` is consumed as raw
  * TypeScript — its package.json points `exports` straight at `src/index.ts` and
@@ -21,18 +31,30 @@
  */
 
 import { build } from 'esbuild';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const API_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
+// Build Output API layout, relative to the Vercel Root Directory (apps/api):
+//   .vercel/output/config.json                     — routing
+//   .vercel/output/functions/index.func/index.mjs  — the bundle
+//   .vercel/output/functions/index.func/.vc-config.json
+const OUTPUT_ROOT = resolve(API_ROOT, '.vercel/output');
+const FUNC_DIR = resolve(OUTPUT_ROOT, 'functions/index.func');
+
+mkdirSync(FUNC_DIR, { recursive: true });
+
 const result = await build({
   entryPoints: [resolve(API_ROOT, 'src/vercel.ts')],
-  outfile: resolve(API_ROOT, 'api/index.js'),
+  // `.mjs` so Node loads it as ESM regardless of any package.json above it.
+  outfile: resolve(FUNC_DIR, 'index.mjs'),
   bundle: true,
   platform: 'node',
-  // Matches the `engines: node >= 22` the repo already declares, and Vercel's
-  // current Node runtime. Lower would silently down-level top-level await.
+  // Matches the `engines: node >= 22` the repo already declares, and the
+  // `nodejs22.x` runtime set in .vc-config.json below. Lower would silently
+  // down-level top-level await.
   target: 'node22',
   format: 'esm',
   // Some dependencies in the Stacks/Fastify trees are CommonJS and reference
@@ -57,5 +79,45 @@ const result = await build({
   metafile: true,
 });
 
+// How the Node runtime invokes the bundle. `handler` is the default export of
+// index.mjs (src/vercel.ts's `export default handler`). `maxDuration` and
+// `memory` carry over from what the old vercel.json `functions` block set —
+// 30s because some chain reads are slow, and losing it would cap requests at the
+// platform's 10s default.
+writeFileSync(
+  resolve(FUNC_DIR, '.vc-config.json'),
+  JSON.stringify(
+    {
+      runtime: 'nodejs22.x',
+      handler: 'index.mjs',
+      launcherType: 'Nodejs',
+      // The handler drives Fastify with raw (req, res); it does not use Vercel's
+      // body/helper sugar, so leave it off.
+      shouldAddHelpers: false,
+      maxDuration: 30,
+      memory: 1024,
+    },
+    null,
+    2,
+  ) + '\n',
+);
+
+// Route every path to the one function. Fastify still reads the original path
+// from req.url, so the catch-all picks the handler without rewriting what the
+// handler sees — the property §4.1 of the runbook calls load-bearing.
+writeFileSync(
+  resolve(OUTPUT_ROOT, 'config.json'),
+  JSON.stringify(
+    {
+      version: 3,
+      routes: [{ src: '/(.*)', dest: '/index' }],
+    },
+    null,
+    2,
+  ) + '\n',
+);
+
 const bytes = Object.values(result.metafile.outputs).reduce((n, o) => n + o.bytes, 0);
-console.log(`\napi/index.js — ${(bytes / 1024 / 1024).toFixed(2)} MB bundled`);
+console.log(
+  `\n.vercel/output/functions/index.func/index.mjs — ${(bytes / 1024 / 1024).toFixed(2)} MB bundled`,
+);

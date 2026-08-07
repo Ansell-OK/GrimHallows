@@ -44,7 +44,7 @@ process.env.ORACLE_PRIVATE_KEY =
 // test of the bundle, not of the database.
 process.env.DATABASE_URL = '';
 
-const bundle = resolve(API_ROOT, 'api/index.js');
+const bundle = resolve(API_ROOT, '.vercel/output/functions/index.func/index.mjs');
 const { default: handler } = await import(pathToFileURL(bundle).href);
 
 const server = createServer((req, res) => handler(req, res));
