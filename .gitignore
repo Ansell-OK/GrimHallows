@@ -19,6 +19,12 @@ build/
 .env.*
 !.env.example
 
+# Scratch file for a plaintext seed phrase, read by scripts/derive-oracle-key.mjs
+# and meant to be deleted right after. Ignored by exact name AND by suffix so a
+# renamed copy (oracle-mnemonic.bak, my.mnemonic) can't slip through.
+oracle-mnemonic.txt
+*.mnemonic
+
 # Clarinet — Mainnet/Testnet settings carry the seed phrase. Devnet.toml is
 # left tracked on purpose: it uses Clarinet's public default mnemonic.
 contracts/.cache/
