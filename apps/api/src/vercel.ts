@@ -28,35 +28,46 @@
  * to the project. That key can move sponsor-pool funds via `reveal-and-resolve`.
  * See docs/08-deployment.md.
  *
- * ROUTING. `vercel.json` rewrites every path to this one function, and Fastify
- * still sees the original path in `req.url` — the rewrite picks the handler, it
- * does not rewrite what the handler reads. That is what makes a single
- * entrypoint work for an app with real routes, and it is load-bearing: if it
- * were ever untrue, every route would 404 at once. Any route check after a
- * deploy catches it, which is why the runbook's first smoke step is `/config`
- * and not just `/health`.
+ * ROUTING. The Build Output API's `config.json` routes every path to this one
+ * function, and Fastify still sees the original path in `req.url` — the route
+ * picks the handler, it does not rewrite what the handler reads. That is what
+ * makes a single entrypoint work for an app with real routes, and it is
+ * load-bearing: if it were ever untrue, every route would 404 at once. Any route
+ * check after a deploy catches it, which is why the runbook's first smoke step is
+ * `/config` and not just `/health`.
  *
  * THIS FILE IS BUNDLED, NOT SHIPPED AS-IS. `npm run build` esbuilds it into
- * `api/index.js`, which is what Vercel actually runs. The bundle is not a
- * packaging preference: `@grimhallow/shared` publishes raw TypeScript
- * (`"exports": {".": "./src/index.ts"}`) and is never compiled, so a deployment
- * that merely traced node_modules would ship a `.ts` file that Node cannot
- * import. Bundling inlines it.
+ * `.vercel/output/functions/index.func/index.mjs`, the prebuilt function Vercel
+ * actually runs. The bundle is not a packaging preference: `@grimhallow/shared`
+ * publishes raw TypeScript (`"exports": {".": "./src/index.ts"}`) and is never
+ * compiled, so a deployment that merely traced node_modules would ship a `.ts`
+ * file that Node cannot import. Bundling inlines it.
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { FastifyInstance } from 'fastify';
-import { buildServer } from './server.js';
 
 let appPromise: Promise<FastifyInstance> | null = null;
 
 function getApp(): Promise<FastifyInstance> {
-  appPromise ??= buildServer({ onDemand: true }).then(async (app) => {
-    // Fastify will not route until the plugin tree is resolved, and `emit` below
-    // bypasses the usual `listen()` path that would have awaited it.
-    await app.ready();
-    return app;
-  });
+  // Dynamic import, deliberately not a top-level one. `server.js` pulls in
+  // `config.ts`, whose `export const config = {…}` validates the environment at
+  // module-load time — `parseNetwork()` rejects a bad STACKS_NETWORK, and
+  // `getNetworkConfig()` rejects a deployer address whose prefix disagrees with
+  // the network. A static import would run that validation when this bundle is
+  // first imported, before `handler` exists, so those throws would crash the
+  // function opaquely (Vercel's FUNCTION_INVOCATION_FAILED) with nothing in the
+  // response to say why. Importing here defers the whole module graph into the
+  // try/catch below, so a misconfig surfaces as the logged 500 this file already
+  // knows how to produce — and the real message lands in the platform's logs.
+  appPromise ??= import('./server.js')
+    .then(({ buildServer }) => buildServer({ onDemand: true }))
+    .then(async (app) => {
+      // Fastify will not route until the plugin tree is resolved, and `emit` below
+      // bypasses the usual `listen()` path that would have awaited it.
+      await app.ready();
+      return app;
+    });
   return appPromise;
 }
 
