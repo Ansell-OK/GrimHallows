@@ -236,3 +236,48 @@ export function resolveReward(args: {
   if (args.combatOutcome !== 'win') return NO_REWARD;
   return drawReward(args.seed, args.sponsorPoolUstx);
 }
+
+/**
+ * The same table, drawn for a run that paid no gate fee (docs/09 B7).
+ *
+ * WHY FREE RUNS DRAW AT ALL. Loot is the forge's entire input supply, and forging
+ * is meant to be its own progression path. Gating loot behind the gate fee left a
+ * non-paying player unable to ever forge anything, which was a bug in the
+ * free/paid split rather than a deliberate boundary.
+ *
+ * THE SPLIT IS BY REWARD TYPE, NOT BY DUNGEON TYPE. Loot mints fresh and costs
+ * the sponsor pool nothing, so it drops everywhere. A jackpot is real STX out of
+ * an owner-funded pool, and paying one on a free entry would mean the pool funds
+ * prizes for runs that contributed no revenue — so the jackpot stays behind the
+ * fee. `sponsorPoolUstx` is therefore not a parameter here at all: this function
+ * cannot spend the pool, and could not be made to by passing it a balance.
+ *
+ * A ROLLED JACKPOT BECOMES `none`, NOT LOOT. Upgrading it would hand free runs
+ * 31% loot against a paid run's 30% — a skew in the free direction, which B7
+ * rules out as explicitly as the reverse ("same loot table everywhere"). Mapping
+ * it to `none` keeps the loot branch firing on exactly the same 3,000 basis
+ * points either way, which is what makes the two tables comparable.
+ *
+ * Deliberately not the underfunded-pool `degraded` path, even though both turn a
+ * jackpot into something else: `degraded` means "the pool was short, top it up"
+ * and is logged for the operator. A free run's jackpot roll is not an incident
+ * and must not read as one.
+ */
+export function resolveFreeRunReward(args: {
+  readonly seed: string | Uint8Array;
+  readonly combatOutcome: 'win' | 'loss';
+}): RewardResult {
+  if (args.combatOutcome !== 'win') return NO_REWARD;
+
+  const draw = drawRewardTable(args.seed);
+  if (draw.kind !== 'loot') return NO_REWARD;
+
+  const tier = draw.tier as number;
+  return {
+    kind: 'loot',
+    amountUstx: null,
+    lootUri: lootUriForTier(tier),
+    tier,
+    degraded: false,
+  };
+}

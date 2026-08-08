@@ -39,6 +39,7 @@ import {
   ENCOUNTER_ALGO_VERSION,
   EncounterError,
   STATS_ALGO_VERSION,
+  resolveFreeRunReward,
   runEncounter,
   type CombatTurn,
   type EncounterSetup,
@@ -364,6 +365,7 @@ export class RunOracle {
 
     // Free run: sign the resolution and store it.
     const resolvedAt = this.now();
+    const reward = resolveFreeRunReward({ seed, combatOutcome: outcome });
     const signature = this.deps.signer.sign(
       resolveStatement({
         runId: current.run.id,
@@ -386,13 +388,28 @@ export class RunOracle {
       seedReveal: seed,
       combatOutcome: outcome,
       resolveSignature: signature,
+      // Loot drops on every dungeon (docs/09 B7): it is the forge's only input
+      // supply, so gating it behind the gate fee left a non-paying player unable
+      // to ever forge. `resolveFreeRunReward` draws the identical loot branch a
+      // paid run does and cannot return a jackpot — it takes no pool balance, so
+      // a free run being unable to spend sponsor funds is structural here rather
+      // than a check someone has to remember to write.
+      reward: {
+        kind: reward.kind,
+        amountUstx: reward.amountUstx,
+        // Nothing is minted yet. The NFT arrives later, from the ceremony the
+        // loot minter runs on chain, and this is filled in from its resolve —
+        // same reason it is null on a paid run, one step further removed.
+        lootTokenId: null,
+        degraded: reward.degraded,
+      },
       resolvedAt,
     });
 
     // Null means someone else resolved it first — same outcome either way, since
     // the outcome is a function of inputs that are now frozen.
     const run = resolved ?? (await this.deps.runs.findById(current.run.id))!;
-    this.deps.log?.('run resolved', { runId: run.id, outcome });
+    this.deps.log?.('run resolved', { runId: run.id, outcome, reward: reward.kind });
     return { ...current, run };
   }
 }

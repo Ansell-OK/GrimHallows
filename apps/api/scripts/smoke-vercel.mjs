@@ -43,6 +43,10 @@ process.env.ORACLE_PRIVATE_KEY =
 // No Postgres: the in-memory stores are used, which is what we want — this is a
 // test of the bundle, not of the database.
 process.env.DATABASE_URL = '';
+// Switches the cron surface on so the check below tests a live gate rather than
+// the "not configured" branch. Not the deployed secret and not a secret at all —
+// the only request made against it is one that must be refused.
+process.env.CRON_SECRET = 'smoke-test-cron-secret';
 
 const bundle = resolve(API_ROOT, '.vercel/output/functions/index.func/index.mjs');
 const { default: handler } = await import(pathToFileURL(bundle).href);
@@ -94,6 +98,19 @@ await check('/config', (res, body) => {
 await check('/definitely-not-a-route', (res, body) => {
   if (res.status !== 404) return `expected 404, got ${res.status}`;
   if (body?.error?.code !== 'NOT_FOUND') return `expected NOT_FOUND, got ${JSON.stringify(body)}`;
+  return null;
+});
+
+// The cron endpoint, unauthenticated. Two things at once, and both are the sort
+// that only fail in production: that the scheduled path exists in the bundle at
+// all (a 404 here means the platform's cron would call nothing every minute, and
+// report success for it), and that it refuses a caller without the secret. A GET
+// because that is the only method Vercel Cron issues.
+await check('/jobs/loot-mint', (res, body) => {
+  if (res.status !== 401) return `expected 401, got ${res.status}`;
+  if (body?.error?.code !== 'CRON_AUTH_FAILED') {
+    return `expected CRON_AUTH_FAILED, got ${JSON.stringify(body)}`;
+  }
   return null;
 });
 

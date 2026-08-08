@@ -8,10 +8,23 @@
  *
  * WHAT THIS MODULE IS ALLOWED TO SIGN
  *
- * Exactly two contract calls: `commit-seed` and `reveal-and-resolve`, both
- * against `game-core`, both for a run the chain says exists. It cannot sign
- * `fund-pool` (owner-only, and the owner key lives elsewhere), cannot sign a
- * transfer, and cannot sign anything on behalf of a player.
+ * Three contract calls: `commit-seed`, `reveal-and-resolve`, and — since docs/09
+ * B7 — `enter-dungeon`, all against `game-core`. It cannot sign `fund-pool`
+ * (owner-only, and the owner key lives elsewhere), cannot sign a transfer, and
+ * cannot sign anything on behalf of a player.
+ *
+ * `enterFreeDungeon` is the narrow one. It exists because loot now drops on free
+ * runs too, `character-loot-nft.mint` is reachable only through
+ * `reveal-and-resolve`, and that only settles a run the chain already knows
+ * about — so a free run's drop has to be escorted through a real on-chain run.
+ * It is pinned to `FREE_DUNGEON_ID`, whose gate fee is zero and whose `is-paid`
+ * is false, and it carries a Deny-mode post-condition set of `[]`. So it cannot
+ * charge anyone, cannot touch the sponsor pool, and would abort if it tried.
+ *
+ * And it signs neither of them unless the contract's `oracle` var is this key —
+ * see `assertIsContractOracle`. A key the contract does not recognise produces
+ * transactions that broadcast cleanly and abort on chain, which is worse than a
+ * refusal because the database records them as settled.
  *
  * WHERE THE OUTCOME COMES FROM
  *
@@ -43,8 +56,10 @@ import {
 } from '@stacks/transactions';
 import {
   DICE_ALGO_VERSION,
+  FREE_DUNGEON_ID,
   REWARD_ALGO_VERSION,
   contractId as buildContractId,
+  resolveFreeRunReward,
   resolveReward,
   type CombatOutcome,
   type NetworkConfig,
@@ -119,6 +134,71 @@ export class PaidRunOracle {
 
   private get gameCoreId(): string {
     return buildContractId(this.deps.stacks, 'gameCore');
+  }
+
+  /**
+   * The contract's `oracle` var, once it has been confirmed to be this key.
+   *
+   * Only a *match* is remembered. Caching a mismatch would mean the operator
+   * fixing it on chain does not take effect until someone redeploys the API,
+   * which for a bug whose whole nature is "settlement silently stopped working"
+   * is the wrong way round.
+   */
+  private confirmedOracle: string | null = null;
+
+  /**
+   * Refuse to sign unless the contract would actually accept the signature.
+   *
+   * `commit-seed` and `reveal-and-resolve` both assert `tx-sender == (var-get
+   * oracle)`, and the var is initialised at deploy to the deployer — so a
+   * backend rotated onto its own key (the reason ORACLE_PRIVATE_KEY is separate
+   * from OWNER_PRIVATE_KEY at all) is rejected by the contract until `set-oracle`
+   * has been called. `npm run set-oracle` is that call.
+   *
+   * WHY THIS IS A PRE-FLIGHT READ RATHER THAN ERROR HANDLING. There is no error
+   * to handle. `broadcastTransaction` succeeds — the node accepts a
+   * well-formed transaction from a funded account — and the assert fires later,
+   * on chain, as `(err u201)`. Nothing re-reads it, so the run is written to
+   * Postgres as resolved and only the explorer disagrees. On mainnet this ran for
+   * six consecutive oracle transactions: three paid entries were charged, all
+   * three aborted, and all three read as settled in the database.
+   *
+   * One read-only call per oracle transaction, against a var that changes about
+   * never. That is cheap next to signing a transaction that cannot succeed, and
+   * far cheaper than a settled-looking run nobody was actually paid for.
+   */
+  private async assertIsContractOracle(): Promise<void> {
+    const mine = this.oracleAddress;
+    if (this.confirmedOracle === mine) return;
+
+    const value = await this.deps.chain.callReadOnly({
+      contractId: this.gameCoreId,
+      functionName: 'get-oracle',
+    });
+    const onChain =
+      value.type === ClarityType.PrincipalStandard ||
+      value.type === ClarityType.PrincipalContract
+        ? value.value
+        : null;
+
+    if (onChain !== mine) {
+      // 500, not 409: nothing the player did caused this and nothing they can do
+      // clears it. The detail goes to the log, not to them.
+      this.deps.log?.('ORACLE MISMATCH — refusing to sign; the contract would reject it', {
+        contract: this.gameCoreId,
+        contractOracle: onChain ?? `unreadable (${value.type})`,
+        signingKeyIs: mine,
+        action: 'run `npm run set-oracle -- --confirm` from the owner workstation',
+      });
+      throw new PaidOracleError(
+        'ORACLE_MISMATCH',
+        `${this.gameCoreId} accepts oracle calls from ${onChain ?? 'an unreadable principal'}, ` +
+          `but this instance signs as ${mine}. Refusing to broadcast a transaction that would abort.`,
+        500,
+      );
+    }
+
+    this.confirmedOracle = mine;
   }
 
   /**
@@ -260,6 +340,143 @@ export class PaidRunOracle {
   }
 
   /**
+   * Post `reveal-and-resolve` for a free run's loot ceremony.
+   *
+   * Deliberately NOT `resolveRun`. That method draws from the paid table, which
+   * has a 1% jackpot branch and reads the sponsor pool — pointing it at a free
+   * run would pay STX for an entry that paid no gate fee, the exact thing B7
+   * keeps behind the fee. This draws with `resolveFreeRunReward`, which has no
+   * jackpot branch and takes no pool balance, so the guarantee is structural
+   * rather than a check someone has to remember.
+   *
+   * The reward is still not an argument, for the same reason it is not one on
+   * `resolveRun`: a caller may ask for a run to be settled, never for a
+   * particular outcome. Both paths re-derive from the seed.
+   *
+   * `combatOutcome` is fixed to `win`. Only a winning free run reaches here —
+   * `resolveFreeRunReward` returns nothing on a loss, so a loss never gets a
+   * loot row for the worker to pick up.
+   *
+   * The empty post-condition set under Deny mode is the enforcement that this
+   * cannot pay STX even if the reward argument were somehow wrong: a jackpot
+   * would move uSTX out of `game-core`, and an unlisted movement aborts.
+   */
+  async resolveFreeLootRun(params: {
+    /** The chain-assigned run id from the ceremony's entry, not the DB run id. */
+    readonly chainRunId: string;
+    readonly seed: string;
+  }): Promise<{ readonly resolveTxId: string; readonly reward: RewardResult }> {
+    const seed = normalizeHash(params.seed);
+    const reward = resolveFreeRunReward({ seed, combatOutcome: 'win' });
+
+    if (reward.kind === 'jackpot' || reward.amountUstx !== null) {
+      // Unreachable via `resolveFreeRunReward`. Kept because the cost of being
+      // wrong is paying the pool out to a free entry, and an assert costs nothing.
+      throw new PaidOracleError(
+        'FREE_RUN_STX_REWARD',
+        'Refusing to submit an STX reward for a run that paid no gate fee.',
+        500,
+      );
+    }
+
+    const txId = await this.signAndBroadcast({
+      functionName: 'reveal-and-resolve',
+      functionArgs: [
+        Cl.uint(BigInt(params.chainRunId)),
+        Cl.bufferFromHex(seed),
+        Cl.stringAscii('win'),
+        rewardToClarity(reward),
+      ],
+      postConditions: [],
+    });
+
+    this.deps.log?.('free-run loot minted on chain', {
+      chainRunId: params.chainRunId,
+      rewardKind: reward.kind,
+      tier: reward.tier,
+      txId,
+    });
+
+    return { resolveTxId: txId, reward };
+  }
+
+  /**
+   * Enter the free dungeon as the oracle, to carry a free run's loot drop.
+   *
+   * The run this creates is a **mint vehicle, not a fairness record**. The fight
+   * it stands for was already fought and already attested off-chain, against a
+   * seed the player has been shown; nothing reads this chain run's outcome, and
+   * the drop it mints was decided by `resolveFreeRunReward` before it existed.
+   * What it buys is the only thing it can: a run id `reveal-and-resolve` will
+   * accept, which is the sole route to `character-loot-nft.mint`.
+   *
+   * Pinned to `FREE_DUNGEON_ID` rather than taking a dungeon id, so no caller can
+   * point this at the paid dungeon and have the oracle pay a gate fee. That
+   * dungeon's fee is zero and `transfer-gate-fee` no-ops on `is-paid false`, so
+   * the empty Deny-mode post-condition set below is a statement the chain
+   * enforces: nothing moves.
+   *
+   * `party` is the player, so the mint inside the later resolve credits them.
+   * Returns the txid only — the chain-assigned run id is in the return value of
+   * a transaction that has not confirmed yet, and is read afterwards by
+   * `readEnteredRunId`.
+   */
+  async enterFreeDungeon(params: { readonly player: string }): Promise<string> {
+    const txId = await this.signAndBroadcast({
+      functionName: 'enter-dungeon',
+      functionArgs: [
+        Cl.uint(BigInt(FREE_DUNGEON_ID)),
+        Cl.list([Cl.principal(params.player)]),
+      ],
+      postConditions: [],
+    });
+    this.deps.log?.('free-run loot ceremony entered on chain', {
+      dungeonId: FREE_DUNGEON_ID,
+      player: params.player,
+      txId,
+    });
+    return txId;
+  }
+
+  /**
+   * The run id `enter-dungeon` assigned, read off a confirmed transaction.
+   *
+   * Null while the transaction is still pending — not an error, just "ask again
+   * next pass". Throws if it confirmed as anything other than a success, because
+   * a run id from an aborted entry would name a run that does not exist, and
+   * committing against it would strand the ceremony.
+   *
+   * Read from `resultRepr` rather than the `run-entered` print: the return value
+   * is what the contract promises the caller, and it is one `(ok uN)` rather than
+   * a tuple whose field ordering could change under a redeploy.
+   */
+  async readEnteredRunId(txId: string): Promise<string | null> {
+    const tx = await this.deps.chain.getTransaction(txId);
+    if (!tx || tx.txStatus === 'pending') return null;
+
+    if (tx.txStatus !== 'success') {
+      throw new PaidOracleError(
+        'ENTER_ABORTED',
+        `enter-dungeon ${txId} confirmed as ${tx.txStatus}.`,
+        502,
+      );
+    }
+
+    const match = /^\(ok u(\d+)\)$/.exec((tx.resultRepr ?? '').trim());
+    if (!match) {
+      // A success whose result does not parse means the contract's return shape
+      // moved. Guessing a run id here would commit a seed against someone else's
+      // run, so this refuses instead.
+      throw new PaidOracleError(
+        'ENTER_RESULT_UNREADABLE',
+        `enter-dungeon ${txId} succeeded but returned ${tx.resultRepr ?? 'nothing'}.`,
+        502,
+      );
+    }
+    return match[1];
+  }
+
+  /**
    * Sign with the oracle key and broadcast.
    *
    * Private, and the only place in the codebase that turns the oracle key into a
@@ -271,6 +488,10 @@ export class PaidRunOracle {
     functionArgs: ClarityValue[];
     postConditions: Parameters<typeof makeContractCall>[0]['postConditions'];
   }): Promise<string> {
+    // Here rather than in the two callers: every oracle transaction goes through
+    // this method, so the check cannot be forgotten by whatever calls it next.
+    await this.assertIsContractOracle();
+
     const [contractAddress, contractName] = this.gameCoreId.split('.');
     const network = toTxNetwork(this.deps.stacks.network);
 

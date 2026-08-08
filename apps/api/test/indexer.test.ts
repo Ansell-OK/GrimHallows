@@ -116,6 +116,8 @@ function resolveTx(params: {
   runId: string;
   recipient: string;
   tokenId: number;
+  status?: string;
+  resultRepr?: string;
 }): ChainTransaction {
   const tuple = Cl.tuple({
     event: Cl.stringAscii('loot-minted'),
@@ -127,13 +129,13 @@ function resolveTx(params: {
 
   return {
     txId: txId(params.n),
-    txStatus: 'success',
+    txStatus: params.status ?? 'success',
     txType: 'contract_call',
     senderAddress: STACKS.deployer,
     contractId: GAME_CORE_ID,
     functionName: 'reveal-and-resolve',
     functionArgsRepr: [],
-    resultRepr: '(ok true)',
+    resultRepr: params.resultRepr ?? '(ok true)',
     events: [
       {
         eventType: 'smart_contract_log',
@@ -454,6 +456,421 @@ describe('indexer — loot token id backfill', () => {
 
     expect(await indexer.backfillLoot()).toBe(0);
     expect((await h.runs.findById(runId))?.reward?.lootTokenId).toBeNull();
+  });
+
+  /**
+   * Free runs (docs/09 B7).
+   *
+   * Their drop is minted minutes later, by the loot minter's ceremony, under a
+   * run id the chain assigned that has nothing to do with the row's own id. So
+   * both the transaction to read and the id to match against come off `lootMint`
+   * — and the failure mode being guarded is not a wrong token but no token at
+   * all, since comparing two unrelated counters rejects every print forever.
+   */
+  describe('a free run, whose mint happened in a separate ceremony', () => {
+    let freeRunId: string;
+
+    beforeEach(async () => {
+      freeRunId = await resolvedRun(h.runs, {
+        address: BOB,
+        type: 'free',
+        outcome: 'win',
+        reward: { kind: 'loot' },
+        // No resolve txid: a free fight is settled by oracle signature, off chain.
+      });
+      await h.runs.updateLootMint(freeRunId, {
+        chainRunId: '4242',
+        enterTxId: txId(600),
+        commitTxId: txId(601),
+        resolveTxId: txId(602),
+      });
+    });
+
+    it('fills the token id from the ceremony resolve, matched on the chain run id', async () => {
+      const indexer = indexerOver(
+        h,
+        chainWith([resolveTx({ n: 602, runId: '4242', recipient: BOB, tokenId: 88 })]),
+      );
+
+      expect(await indexer.backfillLoot()).toBe(1);
+      expect((await h.runs.findById(freeRunId))?.reward?.lootTokenId).toBe('88');
+    });
+
+    it('does not match the print against the database run id', async () => {
+      // The two id spaces both look like small integers, so a print naming this
+      // row's own id is the shape a conflation bug produces. It is not this
+      // ceremony's mint and must not be attached.
+      const indexer = indexerOver(
+        h,
+        chainWith([resolveTx({ n: 602, runId: freeRunId, recipient: BOB, tokenId: 88 })]),
+      );
+
+      expect(await indexer.backfillLoot()).toBe(0);
+      expect((await h.runs.findById(freeRunId))?.reward?.lootTokenId).toBeNull();
+    });
+
+    it('waits rather than guessing while the ceremony is still under way', async () => {
+      // A run part-way through the ceremony has an entry and a commit but no
+      // mint. There is no transaction to read a token id off yet, and the next
+      // pass — after the minter has advanced it — will find one.
+      const midCeremony = await resolvedRun(h.runs, {
+        address: BOB,
+        type: 'free',
+        outcome: 'win',
+        reward: { kind: 'loot' },
+      });
+      await h.runs.updateLootMint(midCeremony, {
+        chainRunId: '4243',
+        enterTxId: txId(610),
+        commitTxId: txId(611),
+      });
+
+      const indexer = indexerOver(h, chainWith([]));
+
+      expect(await indexer.backfillLoot()).toBe(0);
+      expect((await h.runs.findById(midCeremony))?.reward?.lootTokenId).toBeNull();
+    });
+  });
+});
+
+describe('indexer — settlement verification', () => {
+  /**
+   * WHAT THIS GROUP IS ABOUT. `resolve()` records a run as settled the moment
+   * `broadcastTransaction` hands back a txid — and a txid only means the node
+   * accepted a well-formed, funded transaction. A failed `asserts!` inside
+   * `reveal-and-resolve` aborts it afterwards, on chain, and nothing looked
+   * again. So `reward_kind = 'loot'` and an NFT that was never minted read
+   * identically in Postgres.
+   *
+   * That shipped. On mainnet the contract's `oracle` var still named the deployer
+   * while the backend signed as its own key, so every oracle transaction aborted
+   * with `(err u201)` — three paid entries charged, all three recorded as
+   * settled. This pass is what would have caught it.
+   *
+   * The load-bearing distinction below is between an abort and a pending
+   * transaction. An abort is final and must be flagged; a pending one is
+   * ordinary and must not be, because a slow settlement and a dead one look
+   * identical until the chain decides.
+   */
+
+  /** An indexer over the harness's stores with a pinned clock and captured log details. */
+  function verifier(h: Harness, chain: ChainClient, now?: Date) {
+    const entries: { message: string; detail?: Record<string, unknown> }[] = [];
+    const indexer = new Indexer({
+      chain,
+      stacks: STACKS,
+      runs: h.runs,
+      forgeHistory: h.forgeHistory,
+      playerStats: h.playerStats,
+      forge: forgeServiceReturning(RECIPES),
+      log: (message, detail) => entries.push({ message, detail }),
+      ...(now ? { now: () => now } : {}),
+    });
+    return { indexer, entries };
+  }
+
+  it('marks a settlement the chain confirmed', async () => {
+    const h = harness(chainWith([]));
+    const runId = await resolvedRun(h.runs, {
+      address: ALICE,
+      type: 'paid',
+      outcome: 'win',
+      reward: { kind: 'loot' },
+      resolveTxId: txId(500),
+    });
+    const { indexer } = verifier(
+      h,
+      chainWith([resolveTx({ n: 500, runId, recipient: ALICE, tokenId: 77 })]),
+    );
+
+    expect(await indexer.verifySettlements()).toEqual({ verified: 1, aborted: 0 });
+    const run = await h.runs.findById(runId);
+    expect(run?.settlementVerifiedAt).not.toBeNull();
+    // Null reason is the positive result, not an absence of information.
+    expect(run?.settlementAbortReason).toBeNull();
+  });
+
+  it('flags a settlement the chain refused, and records the status verbatim', async () => {
+    // The mainnet bug, reproduced: broadcast accepted, `(err u201)` on chain,
+    // database says the player won loot.
+    const h = harness(chainWith([]));
+    const runId = await resolvedRun(h.runs, {
+      address: ALICE,
+      type: 'paid',
+      outcome: 'win',
+      reward: { kind: 'loot' },
+      resolveTxId: txId(501),
+    });
+    const { indexer } = verifier(
+      h,
+      chainWith([
+        resolveTx({
+          n: 501,
+          runId,
+          recipient: ALICE,
+          tokenId: 77,
+          status: 'abort_by_response',
+          resultRepr: '(err u201)',
+        }),
+      ]),
+    );
+
+    expect(await indexer.verifySettlements()).toEqual({ verified: 1, aborted: 1 });
+    // The chain's own vocabulary, so an operator can search for the string the
+    // explorer shows them rather than a translation of it.
+    expect((await h.runs.findById(runId))?.settlementAbortReason).toBe('abort_by_response');
+  });
+
+  it('logs the Clarity error and the reward that does not exist', async () => {
+    // `(err u201)` is ERR-NOT-ORACLE and names the assert that failed — the single
+    // most useful field for working out why, and the one thing six aborted
+    // mainnet transactions never put in a log.
+    const h = harness(chainWith([]));
+    const runId = await resolvedRun(h.runs, {
+      address: ALICE,
+      type: 'paid',
+      outcome: 'win',
+      reward: { kind: 'jackpot', amountUstx: '5000000' },
+      resolveTxId: txId(502),
+    });
+    const { indexer, entries } = verifier(
+      h,
+      chainWith([
+        resolveTx({
+          n: 502,
+          runId,
+          recipient: ALICE,
+          tokenId: 1,
+          status: 'abort_by_response',
+          resultRepr: '(err u201)',
+        }),
+      ]),
+    );
+
+    await indexer.verifySettlements();
+
+    const line = entries.find((e) => e.message.includes('SETTLEMENT ABORTED'));
+    expect(line?.detail?.result).toBe('(err u201)');
+    expect(line?.detail?.rewardKind).toBe('jackpot');
+    expect(line?.detail?.rewardAmountUstx).toBe('5000000');
+    expect(line?.detail?.createdBy).toBe(ALICE);
+  });
+
+  it('leaves a pending transaction unverified rather than guessing', async () => {
+    // A settlement in the mempool is the normal case for the first minute of its
+    // life. Marking it either way here would be inventing an answer the chain has
+    // not given.
+    const h = harness(chainWith([]));
+    const runId = await resolvedRun(h.runs, {
+      address: ALICE,
+      type: 'paid',
+      outcome: 'win',
+      reward: { kind: 'loot' },
+      resolveTxId: txId(503),
+    });
+    const { indexer } = verifier(
+      h,
+      chainWith([
+        resolveTx({ n: 503, runId, recipient: ALICE, tokenId: 77, status: 'pending' }),
+      ]),
+    );
+
+    expect(await indexer.verifySettlements()).toEqual({ verified: 0, aborted: 0 });
+    const run = await h.runs.findById(runId);
+    expect(run?.settlementVerifiedAt).toBeNull();
+    expect(run?.settlementAbortReason).toBeNull();
+  });
+
+  it('says nothing about a transaction that has only just been broadcast', async () => {
+    // Every settlement passes through "unconfirmed". Logging each one would bury
+    // the aborts this job exists to surface.
+    const h = harness(chainWith([]));
+    await resolvedRun(h.runs, {
+      address: ALICE,
+      type: 'paid',
+      outcome: 'win',
+      reward: { kind: 'loot' },
+      resolveTxId: txId(504),
+    });
+    const { indexer, entries } = verifier(h, chainWith([]));
+
+    await indexer.verifySettlements();
+    expect(entries).toEqual([]);
+  });
+
+  it('reports a settlement still unconfirmed an hour later, without marking it failed', async () => {
+    // A transaction the mempool dropped never confirms and never aborts — it just
+    // stops existing. Nothing on chain will ever say so, which is why elapsed time
+    // is the only signal, and why it produces a log line rather than a verdict.
+    const h = harness(chainWith([]));
+    const runId = await resolvedRun(h.runs, {
+      address: ALICE,
+      type: 'paid',
+      outcome: 'win',
+      reward: { kind: 'loot' },
+      resolveTxId: txId(505),
+    });
+    const twoHoursOn = new Date(Date.now() + 2 * 60 * 60 * 1000);
+    const { indexer, entries } = verifier(h, chainWith([]), twoHoursOn);
+
+    expect(await indexer.verifySettlements()).toEqual({ verified: 0, aborted: 0 });
+
+    const line = entries.find((e) => e.message.includes('still unconfirmed'));
+    expect(line?.detail?.runId).toBe(runId);
+    expect(line?.detail?.known).toBe(false);
+    // Still open, not closed as failed. The chain has not spoken.
+    expect((await h.runs.findById(runId))?.settlementVerifiedAt).toBeNull();
+  });
+
+  it('is write-once — a verified settlement is not re-read on the next pass', async () => {
+    // A confirmed transaction is final, so a second look can only replace a real
+    // answer with a worse one (a node that has since pruned it, say).
+    const h = harness(chainWith([]));
+    const runId = await resolvedRun(h.runs, {
+      address: ALICE,
+      type: 'paid',
+      outcome: 'win',
+      reward: { kind: 'loot' },
+      resolveTxId: txId(506),
+    });
+    const counters = { getTransaction: 0 };
+    const chain = chainWith(
+      [resolveTx({ n: 506, runId, recipient: ALICE, tokenId: 77 })],
+      counters,
+    );
+    const { indexer } = verifier(h, chain);
+
+    expect(await indexer.verifySettlements()).toEqual({ verified: 1, aborted: 0 });
+    expect(await indexer.verifySettlements()).toEqual({ verified: 0, aborted: 0 });
+    expect(counters.getTransaction).toBe(1);
+  });
+
+  it('ignores a free run with no drop to mint', async () => {
+    // A free fight settles by oracle signature, and one that drew nothing has no
+    // transaction anywhere. Selecting it would be work that can never complete.
+    const h = harness(chainWith([]));
+    await resolvedRun(h.runs, { address: ALICE, type: 'free', outcome: 'win' });
+    const { indexer } = verifier(h, chainWith([]));
+
+    expect(await indexer.verifySettlements()).toEqual({ verified: 0, aborted: 0 });
+  });
+
+  /**
+   * Free-run loot mints (docs/09 B7).
+   *
+   * A free run has no `resolveTxId` — but a free run that drew loot has a mint
+   * ceremony, and its `reveal-and-resolve` is the transaction that actually
+   * creates the NFT. It can abort for every reason a paid settlement can.
+   *
+   * The hole this closes is exactly the one this whole group exists for, reopened
+   * on the other path: `FreeRunLootMinter` records the ceremony's resolve txid the
+   * moment the node accepts it and then stops considering the run, so if nothing
+   * reads it back, an aborted ceremony leaves a row promising a drop and no token
+   * — and nothing anywhere says so.
+   */
+  describe('a free run whose drop was minted by a separate ceremony', () => {
+    /** A free run that drew loot, with its ceremony carried as far as `steps` says. */
+    async function freeRunOwedLoot(
+      h: Harness,
+      steps: { enterTxId: string; commitTxId?: string; resolveTxId?: string },
+    ) {
+      const runId = await resolvedRun(h.runs, {
+        address: BOB,
+        type: 'free',
+        outcome: 'win',
+        reward: { kind: 'loot' },
+      });
+      await h.runs.updateLootMint(runId, { chainRunId: '4242', ...steps });
+      return runId;
+    }
+
+    it('marks a ceremony the chain confirmed', async () => {
+      const h = harness(chainWith([]));
+      const runId = await freeRunOwedLoot(h, {
+        enterTxId: txId(650),
+        commitTxId: txId(651),
+        resolveTxId: txId(652),
+      });
+      const { indexer } = verifier(
+        h,
+        chainWith([resolveTx({ n: 652, runId: '4242', recipient: BOB, tokenId: 88 })]),
+      );
+
+      expect(await indexer.verifySettlements()).toEqual({ verified: 1, aborted: 0 });
+      expect((await h.runs.findById(runId))?.settlementAbortReason).toBeNull();
+    });
+
+    it('flags a ceremony the chain refused', async () => {
+      // The player was shown a drop and the row still says loot. Without this the
+      // only record that the NFT does not exist is the explorer.
+      const h = harness(chainWith([]));
+      const runId = await freeRunOwedLoot(h, {
+        enterTxId: txId(653),
+        commitTxId: txId(654),
+        resolveTxId: txId(655),
+      });
+      const { indexer, entries } = verifier(
+        h,
+        chainWith([
+          resolveTx({
+            n: 655,
+            runId: '4242',
+            recipient: BOB,
+            tokenId: 88,
+            status: 'abort_by_response',
+            resultRepr: '(err u201)',
+          }),
+        ]),
+      );
+
+      expect(await indexer.verifySettlements()).toEqual({ verified: 1, aborted: 1 });
+      expect((await h.runs.findById(runId))?.settlementAbortReason).toBe('abort_by_response');
+
+      const line = entries.find((e) => e.message.includes('SETTLEMENT ABORTED'));
+      expect(line?.detail?.resolveTxId).toBe(txId(655));
+      // Which path failed. A free run's abort means the mint ceremony broke, not
+      // the fight, and the operator's next move is different.
+      expect(line?.detail?.dungeonType).toBe('free');
+    });
+
+    it('leaves a ceremony still in the mempool alone', async () => {
+      const h = harness(chainWith([]));
+      const runId = await freeRunOwedLoot(h, {
+        enterTxId: txId(656),
+        commitTxId: txId(657),
+        resolveTxId: txId(658),
+      });
+      const { indexer } = verifier(
+        h,
+        chainWith([
+          resolveTx({ n: 658, runId: '4242', recipient: BOB, tokenId: 88, status: 'pending' }),
+        ]),
+      );
+
+      expect(await indexer.verifySettlements()).toEqual({ verified: 0, aborted: 0 });
+      expect((await h.runs.findById(runId))?.settlementVerifiedAt).toBeNull();
+    });
+
+    it('does not read an entry transaction back as if it were the settlement', async () => {
+      // A ceremony part-way along has an entry txid and no mint. That entry
+      // confirms successfully — it is a `enter-dungeon` call and there is nothing
+      // in it to fail — so a work list widened to any recorded txid would read it,
+      // see `success`, and close the run as verified while the NFT was still
+      // unminted. Which is worse than not looking at all: it turns an open item
+      // into a settled one.
+      const h = harness(chainWith([]));
+      const runId = await freeRunOwedLoot(h, { enterTxId: txId(660), commitTxId: txId(661) });
+      const { indexer } = verifier(
+        h,
+        chainWith([
+          resolveTx({ n: 660, runId: '4242', recipient: BOB, tokenId: 88 }),
+          resolveTx({ n: 661, runId: '4242', recipient: BOB, tokenId: 88 }),
+        ]),
+      );
+
+      expect(await indexer.verifySettlements()).toEqual({ verified: 0, aborted: 0 });
+      expect((await h.runs.findById(runId))?.settlementVerifiedAt).toBeNull();
+    });
   });
 });
 

@@ -24,6 +24,7 @@ import {
   drawRewardTable,
   lootTierName,
   lootUriForTier,
+  resolveFreeRunReward,
   resolveReward,
 } from '../src/index.js';
 
@@ -215,5 +216,95 @@ describe('resolveReward', () => {
       expect(r).toEqual(NO_REWARD);
       expect(r.amountUstx).toBeNull();
     }
+  });
+});
+
+describe('resolveFreeRunReward — loot everywhere, STX only where a fee was paid (docs/09 B7)', () => {
+  /**
+   * The property the whole function exists for, and the one a player can check:
+   * a free run cannot pay STX. Not "usually does not" — there is no seed, however
+   * lucky, and no pool, however full, that produces a jackpot here. The pool
+   * balance is not even a parameter, so the guarantee is structural.
+   */
+  it('never pays a jackpot, across every seed that would have won one', () => {
+    let jackpotSeedsSeen = 0;
+    for (let i = 0; i < 20_000; i++) {
+      const seed = seedAt(i);
+      if (drawRewardTable(seed).kind === 'jackpot') jackpotSeedsSeen++;
+      const r = resolveFreeRunReward({ seed, combatOutcome: 'win' });
+      expect(r.kind).not.toBe('jackpot');
+      expect(r.amountUstx).toBeNull();
+    }
+    // Guards the assertion above against being vacuous: if the sample contained
+    // no jackpot seeds, the loop would prove nothing about the jackpot branch.
+    expect(jackpotSeedsSeen).toBeGreaterThan(0);
+  });
+
+  /**
+   * B7's "same loot table everywhere" is a claim about hit *rates*, and the only
+   * way to break it silently is to redistribute the jackpot's basis points. So the
+   * loot branch is asserted to fire on exactly the same seeds either way.
+   */
+  it('drops loot on precisely the seeds a paid run would, at the same tier', () => {
+    for (let i = 0; i < 5_000; i++) {
+      const seed = seedAt(i);
+      const free = resolveFreeRunReward({ seed, combatOutcome: 'win' });
+      const paid = drawReward(seed, RICH_POOL);
+      if (paid.kind !== 'loot') continue;
+      // Identical, including the uri — the forge validates recipes against tier,
+      // so a free-run drop that landed on a different tier would forge differently.
+      expect(free).toEqual(paid);
+    }
+  });
+
+  it('turns a rolled jackpot into nothing, not into an extra loot drop', () => {
+    // Upgrading it would give free runs 31% loot against a paid run's 30%. B7
+    // rules out skewing loot in *either* direction, and this is the direction
+    // that would be easy to justify and still wrong.
+    const jackpotSeed = (() => {
+      for (let i = 0; i < 20_000; i++) {
+        if (drawRewardTable(seedAt(i)).kind === 'jackpot') return seedAt(i);
+      }
+      throw new Error('no jackpot seed found in sample — table is misconfigured');
+    })();
+
+    expect(resolveFreeRunReward({ seed: jackpotSeed, combatOutcome: 'win' })).toEqual(NO_REWARD);
+  });
+
+  it('does not mark a free run as degraded', () => {
+    // `degraded` means "the sponsor pool was short, top it up" and is logged for
+    // the operator. A free run declining to pay a jackpot is by design, and must
+    // not page anyone.
+    for (let i = 0; i < 5_000; i++) {
+      expect(resolveFreeRunReward({ seed: seedAt(i), combatOutcome: 'win' }).degraded).toBe(false);
+    }
+  });
+
+  it('pays nothing on a loss', () => {
+    // Same rule as the paid table: a party that was wiped out did not complete the
+    // dungeon. Rank credit is separate and still awarded.
+    for (let i = 0; i < 2_000; i++) {
+      expect(resolveFreeRunReward({ seed: seedAt(i), combatOutcome: 'loss' })).toEqual(NO_REWARD);
+    }
+  });
+
+  it('hits the loot rate the paid table specifies', () => {
+    // The rate is the thing a player would notice being quietly nerfed for free
+    // dungeons, and the reason it can be asserted this tightly is that both paths
+    // read the same LOOT_ODDS_BPS.
+    const sample = 30_000;
+    let loot = 0;
+    for (let i = 0; i < sample; i++) {
+      if (resolveFreeRunReward({ seed: seedAt(i), combatOutcome: 'win' }).kind === 'loot') loot++;
+    }
+    const rateBps = (loot / sample) * REWARD_DRAW_RANGE;
+    expect(Math.abs(rateBps - LOOT_ODDS_BPS)).toBeLessThan(200);
+  });
+
+  it('is deterministic, so a player can recompute their own drop from the revealed seed', () => {
+    const seed = seedAt(7);
+    expect(resolveFreeRunReward({ seed, combatOutcome: 'win' })).toEqual(
+      resolveFreeRunReward({ seed, combatOutcome: 'win' }),
+    );
   });
 });

@@ -20,16 +20,23 @@
  *     leaderboard scores with.
  *   - **A named item.** Loot is a tier, not a catalogue entry. The art below is
  *     decoration chosen by nothing; the tier and its metadata URI are the facts.
- *   - **"Rewards have been sent to your wallet."** True only for a paid win that
+ *   - **"Rewards have been sent to your wallet."** True only for a win that
  *     drew something, and then only because a transaction says so — which is why
- *     that sentence is now attached to `resolveTxId` rather than printed
+ *     that sentence is now attached to a txid rather than printed
  *     unconditionally.
  *
- * The reward table is only drawn for a paid run that was **won** — `resolveReward`
- * returns `NO_REWARD` for a loss without rolling, and a free run never consults
- * the table. So "no prize" and "no draw" are two different outcomes and this
- * screen renders them differently: telling a wiped party the dice missed would be
- * describing a roll that never happened.
+ * The reward table is drawn for any run that was **won**, free or paid — both
+ * reward functions return `NO_REWARD` on a loss without rolling. So "no prize" and
+ * "no draw" are two different outcomes and this screen renders them differently:
+ * telling a wiped party the dice missed would be describing a roll that never
+ * happened.
+ *
+ * WHAT DIFFERS ON A FREE RUN (docs/09 B7). The same table, minus the jackpot
+ * branch — a free entry funds nothing, so it cannot be paid out of the sponsor
+ * pool. And its loot is minted by a ceremony that runs *after* this screen loads,
+ * which is a genuinely new state to render: an item that was really drawn and
+ * really is not in the wallet yet. That interval is shown as itself rather than
+ * papered over in either direction.
  */
 
 import React, { useEffect, useState } from 'react';
@@ -180,10 +187,11 @@ export default function Reward() {
 
   const reward = data.reward;
   const won = data.combatOutcome === 'win';
-  const resolveTxUrl =
-    config && data.verification.resolveTxId
-      ? explorerTxLink(config, data.verification.resolveTxId)
-      : null;
+  // Whichever transaction is the claim for *this* run. A paid win's payout and
+  // mint both happen inside `reveal-and-resolve`; a free win's drop is minted by a
+  // later ceremony, and its resolve is the only transaction there is to cite.
+  const settleTxId = data.verification.resolveTxId ?? data.lootMint?.txId ?? null;
+  const settleTxUrl = config && settleTxId ? explorerTxLink(config, settleTxId) : null;
   const points = rankCredit(data);
 
   return (
@@ -213,9 +221,14 @@ export default function Reward() {
         </motion.div>
 
         {drew ? (
-          <TableDraw stage={stage} reward={reward} />
+          <TableDraw
+            stage={stage}
+            reward={reward}
+            dungeonType={data.dungeonType}
+            lootMint={data.lootMint}
+          />
         ) : (
-          <NoDraw dungeonType={data.dungeonType} won={won} />
+          <NoDraw dungeonType={data.dungeonType} />
         )}
 
         <motion.div
@@ -227,7 +240,7 @@ export default function Reward() {
           <Settlement
             data={data}
             reward={reward}
-            resolveTxUrl={resolveTxUrl}
+            settleTxUrl={settleTxUrl}
           />
 
           <div className="mt-6 text-center">
@@ -272,15 +285,24 @@ export default function Reward() {
  * here would silently restate itself if those constants were ever retuned, which
  * is exactly the kind of quietly-wrong money claim this screen was rewritten to
  * stop making.
+ *
+ * On a free run the jackpot card is not dimmed as a near-miss but labelled as out
+ * of scope. "Not this time" on a prize that could never have been drawn would be
+ * the opposite of the honest context the other two cards provide.
  */
 function TableDraw({
   stage,
   reward,
+  dungeonType,
+  lootMint,
 }: {
   stage: Stage;
   reward: RunResponse['reward'];
+  dungeonType: RunResponse['dungeonType'];
+  lootMint: RunResponse['lootMint'];
 }) {
   const kind = reward?.kind ?? 'none';
+  const free = dungeonType === 'free';
   // A degraded jackpot *was* rolled — it just could not be paid. Both cards are
   // part of that story, so both are lit.
   const jackpotLit = kind === 'jackpot' || reward?.degraded === true;
@@ -308,6 +330,11 @@ function TableDraw({
             <div className="text-sm font-ui text-gold/80 leading-relaxed">
               Rolled — but the sponsor pool could not cover it when this run
               resolved.
+            </div>
+          ) : free ? (
+            <div className="text-sm font-ui text-gray-400 leading-relaxed">
+              Not in play on a free run. The pool pays prizes for entries that paid
+              a fee.
             </div>
           ) : (
             <div className="text-sm font-ui text-gray-400">Not this time.</div>
@@ -368,9 +395,14 @@ function TableDraw({
                   <div className="text-xl font-display text-gray-200 mb-2">
                     Tier {reward.tier} · {lootTierName(reward.tier)}
                   </div>
-                  <div className="text-[10px] font-ui text-gray-500 break-all mb-4">
+                  <div className="text-[10px] font-ui text-gray-500 break-all mb-2">
                     {reward.lootUri}
                   </div>
+                  {/* Only free runs get a line here, and only because only they
+                      have a gap between the draw and the token existing. On a
+                      paid run the mint already happened in the same transaction
+                      that settled the fight, so there is nothing to report. */}
+                  <MintState mint={lootMint} />
                 </>
               ) : (
                 <div className="text-sm font-ui text-gray-400 mb-4">Not this time.</div>
@@ -409,20 +441,68 @@ function TableDraw({
 }
 
 /**
+ * Whether the drawn item is actually in the wallet yet.
+ *
+ * Renders nothing at all when `mint` is null, which is every paid run: there the
+ * mint is a side effect of the transaction that settled the fight, already
+ * finished by the time this screen has anything to draw, and a status line would
+ * only invite doubt about something that is done.
+ *
+ * On a free run the three states are three different truths and none of them may
+ * borrow another's wording. `pending` promises nothing — the token id is the only
+ * proof the NFT exists, and until the indexer reads one back off a confirmed
+ * transaction the honest claim is that the drop is recorded and on its way.
+ * `failed` says so outright rather than spinning forever, because a player who
+ * knows a drop is stuck can ask about it, and one watching a spinner cannot.
+ */
+function MintState({ mint }: { mint: RunResponse['lootMint'] }) {
+  if (!mint) return null;
+
+  if (mint.state === 'minted') {
+    return (
+      <div className="text-[10px] font-ui uppercase tracking-widest text-stx-accent mb-4">
+        In your wallet{mint.tokenId ? ` · #${mint.tokenId}` : ''}
+      </div>
+    );
+  }
+
+  if (mint.state === 'failed') {
+    return (
+      <div className="mb-4">
+        <div className="text-[10px] font-ui uppercase tracking-widest text-blood">
+          Mint did not go through
+        </div>
+        <div className="mt-1 text-[10px] font-ui text-gray-500 leading-relaxed">
+          Recorded against this run and flagged for the operator.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mb-4">
+      <div className="text-[10px] font-ui uppercase tracking-widest text-gold/80 animate-pulse">
+        Minting
+      </div>
+      <div className="mt-1 text-[10px] font-ui text-gray-500 leading-relaxed">
+        Free runs mint in their own transaction, a few minutes after the fight.
+      </div>
+    </div>
+  );
+}
+
+/**
  * What to say when no draw happened.
  *
- * Two distinct cases, kept distinct: a free run never touches the reward table,
- * and a lost paid run reaches `resolveReward` but returns before rolling. Neither
- * is "you rolled and missed", and collapsing them into the empty-handed card
- * would invent a roll.
+ * Only reachable on a wipe now that free runs draw too, and the wording says so
+ * plainly: the table is rolled on a *completed* run, so a wiped party did not roll
+ * and miss — there was no roll. Collapsing this into the empty-handed card would
+ * invent one.
+ *
+ * The dungeon type still changes one clause, because what a wipe cost is not the
+ * same thing in the two cases and a free player should not be told a fee was spent.
  */
-function NoDraw({
-  dungeonType,
-  won,
-}: {
-  dungeonType: RunResponse['dungeonType'];
-  won: boolean;
-}) {
+function NoDraw({ dungeonType }: { dungeonType: RunResponse['dungeonType'] }) {
   return (
     <div className="mb-12 max-w-lg border border-stone bg-obsidian/80 p-8 text-center">
       <img
@@ -431,14 +511,14 @@ function NoDraw({
         className="w-32 h-32 object-contain mx-auto mb-6 grayscale opacity-40"
       />
       <h2 className="font-display text-2xl text-gray-200 mb-3">
-        {dungeonType === 'free' ? 'No reward draw' : 'The table was not rolled'}
+        The table was not rolled
       </h2>
       <p className="text-sm font-ui text-gray-400 leading-relaxed">
+        The reward table is rolled on a completed run. The party was wiped, so no
+        draw was made — this is not a roll that came up empty.
         {dungeonType === 'free'
-          ? 'Free dungeons don’t draw the reward table at all — there is no gate fee and no sponsor payout attached to them. Nothing was drawn, and nothing missed.'
-          : won
-            ? 'This run resolved without a reward draw.'
-            : 'The reward table is rolled on a completed paid run. The party was wiped, so no draw was made — this is not a roll that came up empty.'}
+          ? ' Nothing was staked on this one, so there is nothing to make good.'
+          : ' The gate fee was spent on entry, as it always is.'}
       </p>
     </div>
   );
@@ -447,20 +527,22 @@ function NoDraw({
 /**
  * The one sentence about whether anything actually moved.
  *
- * Every branch that claims a payout is tied to `resolveTxId`, because that
- * transaction is the claim: the jackpot transfer and the loot mint both happen
- * inside `reveal-and-resolve`. Without it there is nothing to assert, so nothing
- * is asserted.
+ * Every branch that claims a payout is tied to a transaction, because that
+ * transaction is the claim. On a paid run it is `reveal-and-resolve`, which
+ * carries both the jackpot transfer and the loot mint; on a free run it is the
+ * loot ceremony's own resolve, which is the only on-chain thing a free run has.
+ * Without one there is nothing to assert, so nothing is asserted.
  */
 function Settlement({
   data,
   reward,
-  resolveTxUrl,
+  settleTxUrl,
 }: {
   data: RunResponse;
   reward: RunResponse['reward'];
-  resolveTxUrl: string | null;
+  settleTxUrl: string | null;
 }) {
+  const mint = data.lootMint;
   return (
     <div className="text-center">
       {reward?.degraded && (
@@ -472,15 +554,22 @@ function Settlement({
         </p>
       )}
       <p className="text-sm font-ui text-gray-400">{settlementText(data)}</p>
-      {resolveTxUrl && (
+      {settleTxUrl && (
         <a
-          href={resolveTxUrl}
+          href={settleTxUrl}
           target="_blank"
           rel="noreferrer"
           className="mt-2 inline-block text-xs font-ui text-stx-accent hover:underline underline-offset-4"
         >
-          View the resolve transaction ↗
+          {mint?.txId ? 'View the mint transaction ↗' : 'View the resolve transaction ↗'}
         </a>
+      )}
+      {mint?.state === 'pending' && !mint.txId && (
+        // No link yet because there is no transaction yet. Saying so is better
+        // than a bare tier with no explanation of where the item is.
+        <p className="mt-2 text-xs font-ui text-gray-500">
+          The mint has not been broadcast yet.
+        </p>
       )}
     </div>
   );
@@ -493,6 +582,12 @@ function Settlement({
  * signatures over statements the player can rebuild. Either way the seed and its
  * hash are here, because "verifiable" means the player leaves this screen holding
  * the inputs rather than our word.
+ *
+ * A free run that drew loot points at one transaction as well, and it is worth
+ * being precise about what it proves: the mint is a *consequence* of the resolve,
+ * not part of it, so it evidences the item — not the fight. Its own run id is the
+ * chain's, unrelated to this run's, and is listed for the same reason: without it
+ * the transaction reads as being about some other run entirely.
  */
 function Verification({
   data,
@@ -503,6 +598,7 @@ function Verification({
 }) {
   const [open, setOpen] = useState(false);
   const v = data.verification;
+  const mint = data.lootMint;
 
   const rows: Array<{ label: string; value: string | null; href?: string | null }> = [
     { label: 'Run', value: data.runId },
@@ -523,6 +619,13 @@ function Verification({
     { label: 'Resolve signature', value: v.resolveSignature },
     { label: 'Transcript hash', value: v.transcriptHash },
     { label: 'Resolved at', value: v.resolvedAt },
+    {
+      label: 'Loot mint tx',
+      value: mint?.txId ?? null,
+      href: config && mint?.txId ? explorerTxLink(config, mint.txId) : null,
+    },
+    { label: 'Loot token id', value: mint?.tokenId ?? null },
+    { label: 'Loot mint status', value: mint ? mint.failedReason ?? mint.state : null },
     {
       label: 'Algorithm versions',
       value: `dice ${v.diceAlgoVersion} · encounter ${v.encounterAlgoVersion} · stats ${v.statsAlgoVersion}`,

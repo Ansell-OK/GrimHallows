@@ -32,6 +32,7 @@ import {
   EncounterError,
   MAX_TURNS,
   STATS_ALGO_VERSION,
+  resolveFreeRunReward,
   runEncounter,
 } from '@grimhallow/shared';
 import { buildServer } from '../src/server.js';
@@ -542,13 +543,38 @@ describe('combat loop', () => {
       expect(body.encounter.combatants.length).toBe(run.encounter.combatants.length);
     });
 
-    it('reports no reward for a free run', async () => {
-      // Free dungeons draw from no reward table because no money moves. A reward
-      // object here would be the first step toward a payout with no pool behind
-      // it.
+    it('reports a free run reward the player can recompute from the revealed seed', async () => {
+      // docs/09 B7: loot drops on every dungeon, because it is the forge's only
+      // input supply. Recomputed from `verification.seed` rather than compared
+      // against a hard-coded tier — the assertion that matters is that the drop
+      // came off the published seed, not that this particular run rolled a 2.
       const run = await startRun();
       await playOut(run);
-      expect((await getRun(run.runId)).json().reward).toBeNull();
+
+      const view = (await getRun(run.runId)).json();
+      expect(view.reward).toEqual(
+        resolveFreeRunReward({
+          seed: view.verification.seed,
+          combatOutcome: view.combatOutcome,
+        }),
+      );
+    });
+
+    it('never pays STX on a free run, whatever the seed rolled', async () => {
+      // The one property a free run must not lose. A free entry contributed no
+      // revenue, so a jackpot here would pay a prize out of the owner-funded
+      // sponsor pool for a run that funded nothing — which is the failure the
+      // free/paid split exists to prevent, and the reason B7 splits the table by
+      // reward type instead of blocking free runs from drawing at all.
+      const run = await startRun();
+      await playOut(run);
+
+      const reward = (await getRun(run.runId)).json().reward;
+      expect(reward.kind).not.toBe('jackpot');
+      expect(reward.amountUstx).toBeNull();
+      // A free run declining a jackpot is by design, not an underfunded pool.
+      // `degraded` pages the operator to top the pool up, and must stay quiet.
+      expect(reward.degraded).toBe(false);
     });
 
     it('withholds the seed for the entire run', async () => {

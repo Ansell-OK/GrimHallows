@@ -635,6 +635,38 @@ export interface VerificationData {
   readonly actions: readonly PlayerAction[];
 }
 
+/**
+ * How a free run's loot drop is getting on chain (docs/09 B7).
+ *
+ * A paid win mints inside its own `reveal-and-resolve`, so the mint and the
+ * settlement are one transaction and `verification.resolveTxId` already points at
+ * it. A free win has no such transaction — the fight settles by oracle signature,
+ * and the drop is escorted on chain minutes later by a separate three-step
+ * ceremony. Without this the reward screen would have to either claim a mint it
+ * cannot evidence or say nothing at all about the item it just showed the player.
+ */
+export interface LootMintStatus {
+  /**
+   * `pending` — not broadcast yet, or broadcast and not yet confirmed. This is
+   *   the normal state for the first minutes of a drop's life.
+   * `minted` — an NFT exists and `tokenId` names it. Only reachable by reading a
+   *   successful transaction back, never from a broadcast.
+   * `failed` — the ceremony was parked, or the chain refused it. The player is
+   *   owed a drop they do not have, which is worth saying out loud rather than
+   *   leaving a spinner turning forever.
+   */
+  readonly state: 'pending' | 'minted' | 'failed';
+  /** The ceremony's resolve transaction. Null until that step is broadcast. */
+  readonly txId: string | null;
+  /**
+   * Assigned by `character-loot-nft` inside the mint, so it is a chain fact and
+   * null until the indexer has read it back off the print event.
+   */
+  readonly tokenId: string | null;
+  /** Why it stopped, when it stopped. Null otherwise. */
+  readonly failedReason: string | null;
+}
+
 export interface RunResponse {
   readonly runId: string;
   readonly dungeonType: 'paid' | 'free';
@@ -644,6 +676,8 @@ export interface RunResponse {
   /** Null before the encounter has been built (i.e. before commit). */
   readonly encounter: EncounterView | null;
   readonly reward: RewardResult | null;
+  /** Null on a paid run, and on any run that drew no loot. */
+  readonly lootMint: LootMintStatus | null;
   readonly verification: VerificationData;
 }
 

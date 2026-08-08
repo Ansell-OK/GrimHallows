@@ -74,7 +74,12 @@ export interface RunRecord {
    * flows and a query that summed them would describe a pot that doesn't exist.
    */
   readonly feePaidUstx: string | null;
-  /** What the reward table drew, once the run resolved. Null on a free run. */
+  /**
+   * What the reward table drew, once the run resolved. Null until then.
+   *
+   * Set on both dungeon types since docs/09 B7 — a free run draws the same loot
+   * branch, and only the STX jackpot is gated behind the gate fee.
+   */
   readonly reward: RunRewardRecord | null;
   /**
    * The three on-chain transactions behind a paid run.
@@ -90,6 +95,43 @@ export interface RunRecord {
   readonly commitSignature: string | null;
   readonly resolveSignature: string | null;
   readonly oracleAddress: string | null;
+  /**
+   * Whether the chain agreed with this settlement, and when we checked.
+   *
+   * `state === 'resolved'` means the backend broadcast `reveal-and-resolve` — it
+   * does not mean the transaction succeeded. A node accepts any well-formed,
+   * funded transaction, and a failed `asserts!` inside the contract aborts it
+   * later, on chain. The two facts are genuinely separate and only one of them
+   * was ever recorded here. `settlementVerifiedAt` is when the indexer read the
+   * transaction back; `settlementAbortReason` is null when it succeeded and
+   * carries the chain's own `tx_status` when it did not.
+   *
+   * Since docs/09 B7 a free run can carry these too, about a different
+   * transaction. A free fight settles by signature and has no `resolveTxId`, but
+   * a free run that drew loot has a mint ceremony whose resolve can abort the
+   * same way — so on a free run these describe `lootMint.resolveTxId`.
+   *
+   * Both null on a settlement not yet checked, and on a free run with no drop to
+   * mint.
+   */
+  readonly settlementVerifiedAt: Date | null;
+  readonly settlementAbortReason: string | null;
+  /**
+   * How a free run's loot drop is being minted on chain (docs/09 B7).
+   *
+   * All null on a paid run, which mints inside its own `reveal-and-resolve`, and
+   * on a free run that drew `none`. A free run that drew loot needs an NFT the
+   * forge can consume, and `character-loot-nft.mint` is reachable only through
+   * `game-core` — so the drop is escorted through a synthetic on-chain run
+   * (`enter-dungeon` → `commit-seed` → `reveal-and-resolve`) and these fields are
+   * how far along that is.
+   *
+   * `lootMintChainRunId` is the id the *chain* assigned, which is not this
+   * record's `id`. They come from different counters and are needed for different
+   * things: `id` is the run a player has open, the chain id is what the
+   * `loot-minted` print carries.
+   */
+  readonly lootMint: FreeRunLootMint | null;
   readonly createdAt: Date;
   /**
    * When the seed was committed. Null before commit.
@@ -116,6 +158,27 @@ export interface RunRewardRecord {
   readonly lootTokenId: string | null;
   /** True when a jackpot was downgraded because the pool couldn't cover it. */
   readonly degraded: boolean;
+}
+
+/**
+ * The on-chain ceremony that mints a free run's loot drop (docs/09 B7).
+ *
+ * Each txid is written as its step is broadcast, so a worker restarting
+ * mid-ceremony resumes from what has already happened rather than starting over
+ * and minting a second NFT for one drop.
+ *
+ * `failedReason` is the terminal state: an aborted step, or an entry transaction
+ * that did not return a run id. It stops the retry loop and marks a player as owed
+ * loot the chain never minted — a thing an operator has to see, not a thing to
+ * keep quietly re-attempting.
+ */
+export interface FreeRunLootMint {
+  /** The id the chain assigned this synthetic run. Not the record's own `id`. */
+  readonly chainRunId: string | null;
+  readonly enterTxId: string | null;
+  readonly commitTxId: string | null;
+  readonly resolveTxId: string | null;
+  readonly failedReason: string | null;
 }
 
 export interface NewFreeRun {
@@ -192,8 +255,13 @@ export interface ResolveDetails {
   /** Null on a paid run, for the same reason as `CommitDetails.commitSignature`. */
   readonly resolveSignature: string | null;
   /**
-   * What the reward table drew. Null on a free run — no money moves there, so
-   * there is no table to draw from.
+   * What the reward table drew.
+   *
+   * Set on both dungeon types since docs/09 B7: a free run draws the same loot
+   * branch a paid one does (`resolveFreeRunReward`), and only the STX jackpot is
+   * gated behind the gate fee. A free row therefore carries `kind = 'loot'` with
+   * `amountUstx` null, and the NFT behind it is minted afterwards by the loot
+   * minter — see `FreeRunLootMint`.
    */
   readonly reward?: RunRewardRecord | null;
   /** The `reveal-and-resolve` txid. Null on a free run. */
@@ -279,12 +347,17 @@ export interface RunStore {
   listTurns(runId: string): Promise<CombatTurn[]>;
 
   /**
-   * Resolved paid runs that drew loot but have no token id recorded yet.
+   * Resolved runs that drew loot but have no token id recorded yet.
    *
    * `RunRewardRecord.lootTokenId` is deliberately null at resolve time — the id
    * is assigned by `character-loot-nft` *inside* the resolve transaction, so the
    * write path that records the reward has not read it. This is the indexer's
    * work list for filling it in from the `loot-minted` print event.
+   *
+   * Both dungeon types since docs/09 B7, and they carry the transaction on
+   * different fields: a paid run's mint happens in its own `resolveTxId`, a free
+   * run's in `lootMint.resolveTxId` from the ceremony the loot minter ran. The
+   * caller has to read the right one — see `Indexer.backfillLoot`.
    */
   listAwaitingLootTokenId(limit: number): Promise<RunRecord[]>;
 
@@ -297,6 +370,70 @@ export interface RunStore {
    * already had an id or is not a resolved loot draw.
    */
   setLootTokenId(runId: string, lootTokenId: string): Promise<boolean>;
+
+  /**
+   * Settled runs whose transaction has not been read back from chain yet.
+   *
+   * The indexer's second work list, and the one that exists because a broadcast
+   * is not a settlement: `resolve()` records a txid the moment the node accepts
+   * the transaction, and a failed `asserts!` aborts it afterwards. Until someone
+   * looks again, a row saying `reward_kind = 'loot'` and an NFT that was never
+   * minted are indistinguishable.
+   *
+   * Since docs/09 B7 that applies to free runs too, on a different transaction. A
+   * free fight is settled by signature and has no `resolveTxId` — but its drop is
+   * minted by the loot minter's ceremony, whose resolve can abort exactly the same
+   * way. The worker records that txid and stops considering the run, so this is
+   * the only pass that ever looks at whether it worked.
+   *
+   * Ordered oldest-first: a settlement that has been unverified longest is the
+   * one most likely to have actually failed, since a healthy one confirms within
+   * a block or two.
+   */
+  listUnverifiedSettlements(limit: number): Promise<RunRecord[]>;
+
+  /**
+   * Record what the chain said about a settlement.
+   *
+   * `abortReason` is null for a transaction that succeeded, and the chain's own
+   * `tx_status` otherwise — passed through rather than mapped to a local
+   * vocabulary, so an operator reading the row can search for the same string the
+   * explorer shows them.
+   *
+   * Write-once: the predicate requires `settlement_verified_at` to still be null.
+   * A confirmed transaction is final, so a second pass has nothing to add, and
+   * re-verifying could only overwrite a real answer with a worse one (a node that
+   * has since forgotten the transaction, say).
+   */
+  markSettlementVerified(
+    runId: string,
+    abortReason: string | null,
+    at: Date,
+  ): Promise<boolean>;
+
+  /**
+   * Free runs that drew loot and have no minted NFT yet (docs/09 B7).
+   *
+   * The loot minter's work list. Includes runs mid-ceremony as well as ones that
+   * have not started: the worker advances whatever step each is on, so "not
+   * finished" is the right selection rather than "not begun". Runs marked failed
+   * are excluded — a terminal state is not a work item.
+   *
+   * Oldest-first, so a drop that has been owed longest is minted first.
+   */
+  listFreeRunsAwaitingLootMint(limit: number): Promise<RunRecord[]>;
+
+  /**
+   * Record one step of the mint ceremony.
+   *
+   * Every field is optional and only non-undefined ones are written, because the
+   * ceremony advances one step at a time and each step knows exactly one new
+   * fact. Nothing here is write-once at the database level: a step that has to be
+   * re-broadcast (dropped from the mempool, say) legitimately replaces its own
+   * txid, and the guard against double-minting is the worker refusing to advance
+   * past a step whose transaction has not confirmed.
+   */
+  updateLootMint(runId: string, patch: Partial<FreeRunLootMint>): Promise<boolean>;
 }
 
 // ---------------------------------------------------------------------------
@@ -328,6 +465,13 @@ interface RunRow {
   commit_signature: string | null;
   resolve_signature: string | null;
   oracle_address: string | null;
+  settlement_verified_at: Date | null;
+  settlement_abort_reason: string | null;
+  loot_mint_chain_run_id: string | null;
+  loot_mint_enter_tx_id: string | null;
+  loot_mint_commit_tx_id: string | null;
+  loot_mint_resolve_tx_id: string | null;
+  loot_mint_failed_reason: string | null;
   created_at: Date;
   committed_at: Date | null;
   resolved_at: Date | null;
@@ -338,7 +482,10 @@ const RUN_COLUMNS = `id, dungeon_type, dungeon_id, spawn_id, party_id, created_b
    encounter_setup_json, seed_reveal, combat_outcome, fee_paid_ustx,
    reward_kind, reward_amount_ustx, reward_loot_token_id, reward_degraded,
    enter_tx_id, commit_tx_id, resolve_tx_id, commit_signature,
-   resolve_signature, oracle_address, created_at, committed_at, resolved_at`;
+   resolve_signature, oracle_address, settlement_verified_at,
+   settlement_abort_reason, loot_mint_chain_run_id, loot_mint_enter_tx_id,
+   loot_mint_commit_tx_id, loot_mint_resolve_tx_id, loot_mint_failed_reason,
+   created_at, committed_at, resolved_at`;
 
 function fromRow(row: RunRow): RunRecord {
   return {
@@ -371,7 +518,8 @@ function fromRow(row: RunRow): RunRecord {
     feePaidUstx: row.fee_paid_ustx === null ? null : String(row.fee_paid_ustx),
     // `reward_kind` is the presence flag — 'none' is a real draw (the table was
     // consulted and paid nothing), which is a different fact from null (no draw
-    // happened, because this run is free or unresolved).
+    // happened, because this run has not resolved). Since docs/09 B7 a free run
+    // draws too, so null no longer implies anything about the dungeon type.
     reward:
       row.reward_kind === null
         ? null
@@ -389,6 +537,26 @@ function fromRow(row: RunRow): RunRecord {
     commitSignature: row.commit_signature,
     resolveSignature: row.resolve_signature,
     oracleAddress: row.oracle_address,
+    settlementVerifiedAt: row.settlement_verified_at,
+    settlementAbortReason: row.settlement_abort_reason,
+    // Presence, not truthiness: the ceremony's first recorded fact may legitimately
+    // be a failure with every txid still null, and a `||`-style check would report
+    // that run as having no mint at all.
+    lootMint:
+      row.loot_mint_chain_run_id === null &&
+      row.loot_mint_enter_tx_id === null &&
+      row.loot_mint_commit_tx_id === null &&
+      row.loot_mint_resolve_tx_id === null &&
+      row.loot_mint_failed_reason === null
+        ? null
+        : {
+            chainRunId:
+              row.loot_mint_chain_run_id === null ? null : String(row.loot_mint_chain_run_id),
+            enterTxId: row.loot_mint_enter_tx_id,
+            commitTxId: row.loot_mint_commit_tx_id,
+            resolveTxId: row.loot_mint_resolve_tx_id,
+            failedReason: row.loot_mint_failed_reason,
+          },
     createdAt: row.created_at,
     committedAt: row.committed_at,
     resolvedAt: row.resolved_at,
@@ -632,15 +800,17 @@ export class PostgresRunStore implements RunStore {
   }
 
   async listAwaitingLootTokenId(limit: number): Promise<RunRecord[]> {
-    // `resolve_tx_id is not null` as well as `reward_kind = 'loot'`: the token id
-    // is read off that transaction's events, so a row without one is not work the
-    // indexer can do — it is a free run, which mints nothing.
+    // A mint transaction is required, not merely a resolved loot draw: the token
+    // id is read off that transaction's events, so a row without one is not work
+    // the indexer can do yet. Since docs/09 B7 there are two places it can be —
+    // a paid run's own resolve, or the ceremony resolve the loot minter recorded
+    // for a free one — and a free run has no `resolve_tx_id` at all.
     const { rows } = await query<RunRow>(
       `select ${RUN_COLUMNS} from runs
         where state = 'resolved'
           and reward_kind = 'loot'
           and reward_loot_token_id is null
-          and resolve_tx_id is not null
+          and coalesce(resolve_tx_id, loot_mint_resolve_tx_id) is not null
         order by resolved_at desc
         limit $1`,
       [limit],
@@ -655,6 +825,91 @@ export class PostgresRunStore implements RunStore {
         where id = $1 and state = 'resolved'
           and reward_kind = 'loot' and reward_loot_token_id is null`,
       [runId, lootTokenId],
+    );
+    return (rowCount ?? 0) === 1;
+  }
+
+  async listUnverifiedSettlements(limit: number): Promise<RunRecord[]> {
+    // Oldest first, which is the opposite of `listAwaitingLootTokenId` above and
+    // deliberately so. That one is chasing a value that arrives moments after the
+    // transaction confirms, so newest-first gets it onto the reward screen
+    // fastest. This one is looking for failures, and the longest-unconfirmed
+    // settlement is the likeliest to be one.
+    //
+    // The OR rather than a `coalesce(...) is not null` so it matches
+    // `runs_settlement_unverified_v2_idx` term for term: the planner proves a
+    // partial index applies by comparing predicates, and it cannot see through
+    // a function call.
+    const { rows } = await query<RunRow>(
+      `select ${RUN_COLUMNS} from runs
+        where state = 'resolved'
+          and settlement_verified_at is null
+          and (resolve_tx_id is not null or loot_mint_resolve_tx_id is not null)
+        order by resolved_at asc
+        limit $1`,
+      [limit],
+    );
+    return rows.map(fromRow);
+  }
+
+  async markSettlementVerified(
+    runId: string,
+    abortReason: string | null,
+    at: Date,
+  ): Promise<boolean> {
+    if (!isRunId(runId)) return false;
+    const { rowCount } = await query(
+      `update runs set settlement_verified_at = $3, settlement_abort_reason = $2
+        where id = $1 and settlement_verified_at is null`,
+      [runId, abortReason, at],
+    );
+    return (rowCount ?? 0) === 1;
+  }
+
+  async listFreeRunsAwaitingLootMint(limit: number): Promise<RunRecord[]> {
+    // Oldest first: a drop owed since yesterday is minted before one owed a
+    // minute ago. Matches the settlement pass rather than the loot-token-id pass,
+    // because this is chasing work that may be stuck, not a value about to arrive.
+    const { rows } = await query<RunRow>(
+      `select ${RUN_COLUMNS} from runs
+        where dungeon_type = 'free'
+          and state = 'resolved'
+          and reward_kind = 'loot'
+          and loot_mint_resolve_tx_id is null
+          and loot_mint_failed_reason is null
+        order by resolved_at asc
+        limit $1`,
+      [limit],
+    );
+    return rows.map(fromRow);
+  }
+
+  async updateLootMint(runId: string, patch: Partial<FreeRunLootMint>): Promise<boolean> {
+    if (!isRunId(runId)) return false;
+
+    // Only keys actually present are written. `undefined` means "this step learnt
+    // nothing about that field"; null is a real value the caller may be clearing.
+    const columns: Record<keyof FreeRunLootMint, string> = {
+      chainRunId: 'loot_mint_chain_run_id',
+      enterTxId: 'loot_mint_enter_tx_id',
+      commitTxId: 'loot_mint_commit_tx_id',
+      resolveTxId: 'loot_mint_resolve_tx_id',
+      failedReason: 'loot_mint_failed_reason',
+    };
+
+    const sets: string[] = [];
+    const values: unknown[] = [runId];
+    for (const [key, column] of Object.entries(columns) as [keyof FreeRunLootMint, string][]) {
+      const value = patch[key];
+      if (value === undefined) continue;
+      values.push(value);
+      sets.push(`${column} = $${values.length}`);
+    }
+    if (sets.length === 0) return false;
+
+    const { rowCount } = await query(
+      `update runs set ${sets.join(', ')} where id = $1 and dungeon_type = 'free'`,
+      values,
     );
     return (rowCount ?? 0) === 1;
   }
@@ -695,6 +950,9 @@ export class MemoryRunStore implements RunStore {
       commitSignature: null,
       resolveSignature: null,
       oracleAddress: null,
+      settlementVerifiedAt: null,
+      settlementAbortReason: null,
+      lootMint: null,
       createdAt: new Date(),
       committedAt: null,
       resolvedAt: null,
@@ -732,6 +990,9 @@ export class MemoryRunStore implements RunStore {
       commitSignature: null,
       resolveSignature: null,
       oracleAddress: null,
+      settlementVerifiedAt: null,
+      settlementAbortReason: null,
+      lootMint: null,
       createdAt: new Date(),
       committedAt: null,
       resolvedAt: null,
@@ -823,7 +1084,8 @@ export class MemoryRunStore implements RunStore {
           r.state === 'resolved' &&
           r.reward?.kind === 'loot' &&
           r.reward.lootTokenId === null &&
-          r.resolveTxId !== null,
+          // The `coalesce` in the SQL: either transaction can carry the print.
+          (r.resolveTxId !== null || r.lootMint?.resolveTxId != null),
       )
       .slice(0, limit);
   }
@@ -844,6 +1106,87 @@ export class MemoryRunStore implements RunStore {
       ...existing,
       reward: { ...existing.reward, lootTokenId },
     });
+    return true;
+  }
+
+  async listUnverifiedSettlements(limit: number): Promise<RunRecord[]> {
+    return [...this.runs.values()]
+      .filter(
+        (r) =>
+          r.state === 'resolved' &&
+          // Either transaction makes a run worth reading back: a paid run's own
+          // settlement, or a free run's loot-mint ceremony resolve. Never both —
+          // the two dungeon types settle on different paths.
+          (r.resolveTxId !== null || r.lootMint?.resolveTxId != null) &&
+          r.settlementVerifiedAt === null,
+      )
+      // Oldest first, matching the SQL. Insertion order is close enough to
+      // resolved_at order here, but sorting explicitly means a test that seeds
+      // runs out of order still sees the ordering the query guarantees.
+      .sort((a, b) => (a.resolvedAt?.getTime() ?? 0) - (b.resolvedAt?.getTime() ?? 0))
+      .slice(0, limit);
+  }
+
+  async markSettlementVerified(
+    runId: string,
+    abortReason: string | null,
+    at: Date,
+  ): Promise<boolean> {
+    const existing = this.runs.get(runId);
+    // Write-once, as in the UPDATE's predicate: a confirmed transaction is final.
+    if (!existing || existing.settlementVerifiedAt !== null) return false;
+    this.runs.set(runId, {
+      ...existing,
+      settlementVerifiedAt: at,
+      settlementAbortReason: abortReason,
+    });
+    return true;
+  }
+
+  async listFreeRunsAwaitingLootMint(limit: number): Promise<RunRecord[]> {
+    return [...this.runs.values()]
+      .filter(
+        (r) =>
+          r.dungeonType === 'free' &&
+          r.state === 'resolved' &&
+          r.reward?.kind === 'loot' &&
+          // `lootMint` is null before the first step, so both checks have to
+          // survive that — a run that has never been touched is owed a mint.
+          r.lootMint?.resolveTxId == null &&
+          r.lootMint?.failedReason == null,
+      )
+      .sort((a, b) => (a.resolvedAt?.getTime() ?? 0) - (b.resolvedAt?.getTime() ?? 0))
+      .slice(0, limit);
+  }
+
+  async updateLootMint(runId: string, patch: Partial<FreeRunLootMint>): Promise<boolean> {
+    const existing = this.runs.get(runId);
+    // Mirrors the UPDATE's `dungeon_type = 'free'` guard. Paid runs mint their
+    // loot inside their own resolve; there is no ceremony to record against one.
+    if (!existing || existing.dungeonType !== 'free') return false;
+
+    const present = (Object.keys(patch) as (keyof FreeRunLootMint)[]).filter(
+      (k) => patch[k] !== undefined,
+    );
+    // An empty patch is a caller bug, not a no-op write — the SQL returns false
+    // for it too rather than issuing `set` with nothing after it.
+    if (present.length === 0) return false;
+
+    const base: FreeRunLootMint = existing.lootMint ?? {
+      chainRunId: null,
+      enterTxId: null,
+      commitTxId: null,
+      resolveTxId: null,
+      failedReason: null,
+    };
+    const next = { ...base };
+    for (const key of present) {
+      // Widened deliberately: every field is `string | null`, and narrowing per
+      // key here would need a switch that adds nothing but five more branches.
+      (next as Record<string, string | null>)[key] = patch[key] as string | null;
+    }
+
+    this.runs.set(runId, { ...existing, lootMint: next });
     return true;
   }
 

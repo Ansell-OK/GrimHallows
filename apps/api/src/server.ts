@@ -51,6 +51,11 @@ import { MemoryRunStore, PostgresRunStore, type RunStore } from './repos/runs.js
 import { MemorySpawnStore, PostgresSpawnStore, type SpawnStore } from './repos/spawns.js';
 import { Indexer } from './indexer/indexer.js';
 import { DEFAULT_INDEXER_CONFIG, IndexerLoop, type IndexerLoopConfig } from './indexer/loop.js';
+import {
+  FreeRunLootMinter,
+  type FreeRunLootMinterConfig,
+} from './oracle/freeRunLootMinter.js';
+import { LootMinterLoop, type LootMinterLoopConfig } from './oracle/lootMinterLoop.js';
 import { OnDemandTicker } from './services/onDemand.js';
 import { CharacterMintService } from './services/characterMintService.js';
 import { CharacterService } from './services/characterService.js';
@@ -67,6 +72,7 @@ import { registerCharacterRoutes } from './routes/characters.js';
 import { registerDungeonRoutes } from './routes/dungeons.js';
 import { registerForgeRoutes } from './routes/forge.js';
 import { registerImageProxyRoutes } from './routes/imageProxy.js';
+import { registerJobRoutes } from './routes/jobs.js';
 import { registerLeaderboardRoutes } from './routes/leaderboard.js';
 import { registerMapRoutes } from './routes/map.js';
 import { registerPaidClaimRoutes } from './routes/paidDungeonClaim.js';
@@ -122,6 +128,31 @@ export interface ServerDeps {
    * underneath its assertions. `npm run dev` and production turn it on.
    */
   readonly indexer?: boolean | Partial<IndexerLoopConfig>;
+  /**
+   * Run the free-run loot mint ceremony in-process (docs/09 B7).
+   *
+   * Off by default, and for a stronger reason than the other two: this one signs
+   * and broadcasts with the oracle key. A test that left it on would have a timer
+   * putting mainnet transactions on the wire underneath its assertions.
+   *
+   * Deliberately absent from `onDemand`. That path is for work that produces
+   * content; this mints an NFT a player has already been shown, and it must
+   * happen whether or not anybody is looking at the site.
+   */
+  readonly lootMinter?: boolean | (Partial<LootMinterLoopConfig> & Partial<FreeRunLootMinterConfig>);
+  /**
+   * Shared secret gating `POST|GET /jobs/loot-mint`. Falls back to `CRON_SECRET`.
+   *
+   * This is the other driver for the job above, and the only one that works on a
+   * host where a timer cannot fire — see routes/jobs.ts. Setting it switches the
+   * endpoint on; leaving it unset means the endpoint refuses every request rather
+   * than accepting any caller.
+   *
+   * Not mutually exclusive with `lootMinter`, unlike the timer/on-demand pair:
+   * both drivers go through the same `LootMinterLoop`, so an operator running
+   * both gets skipped passes rather than two ceremonies broadcasting one step.
+   */
+  readonly cronSecret?: string | null;
   /**
    * Drive the spawner and indexer from reads instead of timers.
    *
@@ -455,6 +486,47 @@ export async function buildServer(deps: ServerDeps = {}): Promise<FastifyInstanc
     }
   }
 
+  // Outside the on-demand branch entirely, unlike the two above. This one signs
+  // with the oracle key to mint a drop the player has already been shown, so it
+  // cannot be traffic-driven (see oracle/lootMinterLoop.ts) — and it also must not
+  // be silently skipped just because a host chose that mode.
+  //
+  // One ceremony, at most two drivers. `deps.lootMinter` is the in-process timer a
+  // long-running host uses; `cronSecret` opens the endpoint an external scheduler
+  // calls, which is the only thing that works where a `setInterval` never fires
+  // twice. Both go through this same loop object so they share its in-flight
+  // guard: an operator with both on gets a skipped pass, not two ceremonies
+  // broadcasting the same step.
+  const cronSecret = deps.cronSecret ?? config.cronSecret ?? null;
+  const lootMinterOptions = typeof deps.lootMinter === 'object' ? deps.lootMinter : {};
+  const lootMinter =
+    deps.lootMinter || cronSecret
+      ? new LootMinterLoop(
+          new FreeRunLootMinter(
+            {
+              runs: runStore,
+              oracle: paidOracle,
+              chain,
+              log: (message, detail) => app.log.info(detail ?? {}, message),
+            },
+            lootMinterOptions,
+          ),
+          lootMinterOptions,
+          (message, detail) => app.log.info(detail ?? {}, message),
+        )
+      : null;
+
+  // Registered unconditionally, so an unconfigured deployment answers "the job
+  // surface is off" instead of 404-ing and sending the operator after a typo.
+  await registerJobRoutes(app, { cronSecret: cronSecret || null, lootMinter });
+
+  if (deps.lootMinter && lootMinter) {
+    lootMinter.start();
+    // Tied to the server's lifecycle so a closed test server leaves no timer
+    // holding an oracle key.
+    app.addHook('onClose', async () => lootMinter.stop());
+  }
+
   app.setErrorHandler((err: FastifyError, _req, reply) => {
     if (err instanceof ApiError) {
       // Expected, caller-facing failures: log at warn, return the spec'd shape.
@@ -502,7 +574,11 @@ const isMain =
   !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isMain) {
-  const app = await buildServer({ spawner: true, indexer: true });
+  // The loot minter runs on a timer here, which is the driver a host that owns
+  // its own process can use. On the serverless entry point the timer is inert and
+  // the same loop is driven by `GET /jobs/loot-mint` on the platform's clock
+  // instead — see routes/jobs.ts and docs/08-deployment.md §4.5 (docs/09 B7).
+  const app = await buildServer({ spawner: true, indexer: true, lootMinter: true });
   try {
     await app.listen({ port: config.port, host: config.host });
   } catch (err) {

@@ -25,6 +25,7 @@ import {
   lootUriForTier,
   type ActionResponse,
   type EncounterSetup,
+  type LootMintStatus,
   type PlayerAction,
   type RewardResult,
   type RunResponse,
@@ -211,6 +212,7 @@ export function toRunResponse(view: RunView): RunResponse {
     turns: view.turns,
     encounter: view.encounter,
     reward: toRewardResult(view.run),
+    lootMint: toLootMintStatus(view.run),
     verification: toVerification(view),
   };
 }
@@ -226,9 +228,13 @@ export function toRunResponse(view: RunView): RunResponse {
  * used rather than duplicating it. A column would be a second copy of a value
  * the seed already fixes, free to drift from it.
  *
- * Null for a free run (no table was consulted) and for an unresolved one. Tier
- * and URI stay null if the seed is somehow absent — an unknown tier is reported
- * as unknown rather than guessed at.
+ * Null for an unresolved run, and for a resolved one whose draw came up empty.
+ * Tier and URI stay null if the seed is somehow absent — an unknown tier is
+ * reported as unknown rather than guessed at.
+ *
+ * Free runs land here too since docs/09 B7. Nothing needed changing for that,
+ * which is the point: they store `kind = 'loot'` like any other row, and the
+ * tier is re-derived from the same seed by the same call.
  */
 function toRewardResult(run: RunRecord): RewardResult | null {
   const reward = run.reward;
@@ -243,5 +249,40 @@ function toRewardResult(run: RunRecord): RewardResult | null {
     lootUri: tier === null ? null : lootUriForTier(tier),
     tier,
     degraded: reward.degraded,
+  };
+}
+
+/**
+ * How far along a free run's loot mint is (docs/09 B7).
+ *
+ * Null on a paid run and on a run that drew no loot — a paid win's mint happens
+ * inside the same `reveal-and-resolve` the settlement does, and there is no
+ * second thing to report on. A free win's drop is escorted on chain minutes later
+ * by its own ceremony, so between the reward screen appearing and the NFT
+ * existing there is a real interval that the client has to be able to describe.
+ *
+ * `minted` COMES FROM THE TOKEN ID, NOT THE TXID. The txid is recorded when the
+ * node accepts the broadcast, which is not the same as the mint happening — a
+ * failed `asserts!` aborts afterwards. The token id is only ever written by the
+ * indexer after reading a *successful* transaction's print event, so it is the
+ * one field that cannot be true of a mint that did not occur.
+ *
+ * Both failure sources are reported the same way because they mean the same thing
+ * to a player: `lootMint.failedReason` is the worker parking a ceremony it cannot
+ * advance, `settlementAbortReason` is the chain refusing one it did. Either way
+ * the drop shown on this screen does not exist and an operator has to intervene.
+ */
+function toLootMintStatus(run: RunRecord): LootMintStatus | null {
+  if (run.dungeonType !== 'free' || run.reward?.kind !== 'loot') return null;
+
+  const failedReason = run.lootMint?.failedReason ?? run.settlementAbortReason ?? null;
+  const tokenId = run.reward.lootTokenId;
+  const state = failedReason ? 'failed' : tokenId ? 'minted' : 'pending';
+
+  return {
+    state,
+    txId: run.lootMint?.resolveTxId ?? null,
+    tokenId,
+    failedReason,
   };
 }

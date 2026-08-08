@@ -105,12 +105,33 @@ writeFileSync(
 // Route every path to the one function. Fastify still reads the original path
 // from req.url, so the catch-all picks the handler without rewriting what the
 // handler sees — the property §4.1 of the runbook calls load-bearing.
+//
+// `crons` lives HERE AND NOT IN vercel.json. This build writes config.json
+// itself, and that file is the whole configuration Vercel reads for a prebuilt
+// deployment — a `crons` block in vercel.json would be the source of truth for a
+// project that let the platform infer its own output, and silently nothing for
+// this one. The failure mode is the exact one this schedule exists to fix: the
+// job never runs and nothing reports that it never ran.
+//
+// WHAT IT DRIVES. `/jobs/loot-mint` advances the free-run loot ceremony by one
+// step per pass (docs/09 B7). It is a no-op — one indexed query, no chain traffic
+// — when nothing is owed, and it refuses every request until CRON_SECRET is set,
+// so scheduling it before configuring it is safe but useless. Vercel supplies the
+// secret as an Authorization header on its own; there is nothing to pass here.
+//
+// EVERY MINUTE, WHICH IS A PAID-PLAN FEATURE. A drop takes four passes to reach a
+// wallet, so the interval is most of the player's wait: a minute puts it there in
+// a few, an hour puts it there tomorrow. Vercel's free tier permits daily
+// schedules only and will reject this at deploy time — loudly, which is the right
+// way to find out. Drop to `0 * * * *` if that plan is the constraint, and expect
+// drops to land within a handful of hours rather than minutes.
 writeFileSync(
   resolve(OUTPUT_ROOT, 'config.json'),
   JSON.stringify(
     {
       version: 3,
       routes: [{ src: '/(.*)', dest: '/index' }],
+      crons: [{ path: '/jobs/loot-mint', schedule: '* * * * *' }],
     },
     null,
     2,

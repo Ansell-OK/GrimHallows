@@ -102,6 +102,19 @@ export const config = {
   hiroApiKey: optional('HIRO_API_KEY'),
   databaseUrl: optional('DATABASE_URL'),
   jwtSecret: optional('JWT_SECRET'),
+
+  /**
+   * Shared secret for the scheduled-job endpoints (routes/jobs.ts).
+   *
+   * Not a signing key, so it belongs here rather than beside `loadOracleKey()` —
+   * it authenticates a platform cron, which has no wallet to sign a challenge
+   * with. Empty means the job surface is off, never that it is open.
+   *
+   * Named `CRON_SECRET` because Vercel sets `Authorization: Bearer $CRON_SECRET`
+   * on its cron invocations automatically when a variable by that name exists.
+   * Renaming it would mean gating on a header the platform does not send.
+   */
+  cronSecret: optional('CRON_SECRET'),
 } as const;
 
 /**

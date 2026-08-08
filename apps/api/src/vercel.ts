@@ -13,6 +13,13 @@
  *      spawns expired and the leaderboard would stop advancing, with no error
  *      anywhere. `onDemand` hangs the same two jobs off the reads that need them.
  *
+ *      The free-run loot minter is the exception, and it is not passed either:
+ *      it broadcasts oracle-signed transactions, which `onDemand` forbids
+ *      attaching to request traffic, so it runs on the platform's clock instead.
+ *      Setting `CRON_SECRET` opens `GET /jobs/loot-mint` for that (routes/jobs.ts),
+ *      and `scripts/build-vercel.mjs` schedules it. Without both, a free run's
+ *      drop stays queued in the store — recorded and resumable, not minted.
+ *
  *   2. BUILT ONCE PER INSTANCE, NOT PER REQUEST. `buildServer` constructs a
  *      Postgres pool and a chain client; doing that per invocation would open a
  *      new pool for every request and exhaust the database's connection budget

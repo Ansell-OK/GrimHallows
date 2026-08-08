@@ -306,6 +306,168 @@ describe('MemoryRunStore', () => {
     });
   });
 
+  describe('the free-run loot mint ceremony (docs/09 B7)', () => {
+    /** A resolved free run that drew loot — the state the worker picks up. */
+    async function runOwedLoot(resolvedAt: Date) {
+      const run = await newRun();
+      await runs.commit(run.id, commitDetails());
+      await runs.resolve(run.id, {
+        ...resolveDetails(),
+        resolvedAt,
+        reward: { kind: 'loot', amountUstx: null, lootTokenId: null, degraded: false },
+      });
+      return run;
+    }
+
+    it('offers up a resolved free run that drew loot', async () => {
+      const run = await runOwedLoot(new Date('2026-01-01T00:05:00.000Z'));
+      expect((await runs.listFreeRunsAwaitingLootMint(10)).map((r) => r.id)).toEqual([run.id]);
+    });
+
+    it('leaves a run alone until it has actually resolved', async () => {
+      // The ceremony commits the run's own revealed seed, so a run still being
+      // fought has nothing to escort on chain yet — and its outcome could still
+      // turn out to be a loss.
+      const run = await newRun();
+      await runs.commit(run.id, commitDetails());
+      expect(await runs.listFreeRunsAwaitingLootMint(10)).toEqual([]);
+      expect(run.state).toBe('pending');
+    });
+
+    it('ignores a resolved run whose draw came up empty', async () => {
+      const run = await newRun();
+      await runs.commit(run.id, commitDetails());
+      await runs.resolve(run.id, {
+        ...resolveDetails(),
+        reward: { kind: 'none', amountUstx: null, lootTokenId: null, degraded: false },
+      });
+      // 70% of wins land here. Minting for them would hand out an NFT the reward
+      // table never drew.
+      expect(await runs.listFreeRunsAwaitingLootMint(10)).toEqual([]);
+    });
+
+    it('keeps offering a run mid-ceremony, so a restart resumes it', async () => {
+      // The worker advances one step per pass and is the only thing that knows
+      // which step a run is on. A list that dropped a run after its first txid
+      // would strand every ceremony that was interrupted between steps.
+      const run = await runOwedLoot(new Date('2026-01-01T00:05:00.000Z'));
+      await runs.updateLootMint(run.id, { enterTxId: '0xenter', chainRunId: '42' });
+      expect((await runs.listFreeRunsAwaitingLootMint(10)).map((r) => r.id)).toEqual([run.id]);
+
+      await runs.updateLootMint(run.id, { commitTxId: '0xcommit' });
+      expect((await runs.listFreeRunsAwaitingLootMint(10)).map((r) => r.id)).toEqual([run.id]);
+    });
+
+    it('stops offering a run once the mint has been broadcast', async () => {
+      const run = await runOwedLoot(new Date('2026-01-01T00:05:00.000Z'));
+      await runs.updateLootMint(run.id, { resolveTxId: '0xresolve' });
+      // The double-mint guard: a second pass that still saw this run would run
+      // the whole ceremony again and mint a second NFT for one drop.
+      expect(await runs.listFreeRunsAwaitingLootMint(10)).toEqual([]);
+    });
+
+    it('stops offering a run that has been marked failed', async () => {
+      const run = await runOwedLoot(new Date('2026-01-01T00:05:00.000Z'));
+      await runs.updateLootMint(run.id, { failedReason: 'abort_by_response' });
+      // Retried forever, a permanently failing ceremony would spend oracle STX on
+      // fees every pass. A failure is parked for an operator instead.
+      expect(await runs.listFreeRunsAwaitingLootMint(10)).toEqual([]);
+    });
+
+    it('serves the longest-owed run first', async () => {
+      const later = await runOwedLoot(new Date('2026-01-02T00:00:00.000Z'));
+      const earlier = await runOwedLoot(new Date('2026-01-01T00:00:00.000Z'));
+      // Oldest-first, matching the SQL's `order by resolved_at asc`. Written out
+      // of order on purpose: insertion order would pass a test that sorts nothing.
+      expect((await runs.listFreeRunsAwaitingLootMint(10)).map((r) => r.id)).toEqual([
+        earlier.id,
+        later.id,
+      ]);
+    });
+
+    it('honours the limit', async () => {
+      await runOwedLoot(new Date('2026-01-01T00:00:00.000Z'));
+      await runOwedLoot(new Date('2026-01-02T00:00:00.000Z'));
+      expect(await runs.listFreeRunsAwaitingLootMint(1)).toHaveLength(1);
+    });
+
+    it('records each step without erasing the ones before it', async () => {
+      // Each step is written as it is broadcast, so a patch carries only what
+      // that step learnt. Merging rather than replacing is what lets the worker
+      // read back where it got to.
+      const run = await runOwedLoot(new Date('2026-01-01T00:05:00.000Z'));
+
+      await runs.updateLootMint(run.id, { enterTxId: '0xenter', chainRunId: '42' });
+      await runs.updateLootMint(run.id, { commitTxId: '0xcommit' });
+      await runs.updateLootMint(run.id, { resolveTxId: '0xresolve' });
+
+      expect((await runs.findById(run.id))?.lootMint).toEqual({
+        chainRunId: '42',
+        enterTxId: '0xenter',
+        commitTxId: '0xcommit',
+        resolveTxId: '0xresolve',
+        failedReason: null,
+      });
+    });
+
+    it('starts from all-nulls, so the first step need not write the rest', async () => {
+      const run = await runOwedLoot(new Date('2026-01-01T00:05:00.000Z'));
+      expect(run.lootMint).toBeNull();
+
+      await runs.updateLootMint(run.id, { failedReason: 'ERR-NOT-ORACLE' });
+
+      // A first recorded fact that is a failure, with every txid still null. The
+      // reason this is worth pinning: a presence check written as truthiness
+      // rather than `!== null` would read this row back as no ceremony at all.
+      expect((await runs.findById(run.id))?.lootMint).toEqual({
+        chainRunId: null,
+        enterTxId: null,
+        commitTxId: null,
+        resolveTxId: null,
+        failedReason: 'ERR-NOT-ORACLE',
+      });
+    });
+
+    it('can clear a failure to hand a run back to the worker', async () => {
+      // Null is a real value here, not an absent key — an operator who has fixed
+      // whatever broke needs a way to requeue, and the patch has to distinguish
+      // "clear this" from "this step learnt nothing about that field".
+      const run = await runOwedLoot(new Date('2026-01-01T00:05:00.000Z'));
+      await runs.updateLootMint(run.id, { failedReason: 'abort_by_response' });
+
+      expect(await runs.updateLootMint(run.id, { failedReason: null })).toBe(true);
+      expect((await runs.listFreeRunsAwaitingLootMint(10)).map((r) => r.id)).toEqual([run.id]);
+    });
+
+    it('refuses to record a ceremony against a paid run', async () => {
+      // Paid runs mint their loot inside their own `reveal-and-resolve`. A
+      // ceremony recorded against one would describe a second mint for a drop
+      // that already exists.
+      const paid = await runs.ingestPaidRun({
+        id: '5000',
+        dungeonId: 1,
+        createdBy: PLAYER,
+        character: CHARACTER,
+        feePaidUstx: '1000000',
+        enterTxId: '0xpaidenter',
+      });
+
+      expect(await runs.updateLootMint(paid.id, { enterTxId: '0xenter' })).toBe(false);
+      expect((await runs.findById(paid.id))?.lootMint).toBeNull();
+    });
+
+    it('reports a miss rather than creating anything for an unknown run', async () => {
+      expect(await runs.updateLootMint('999999', { enterTxId: '0xenter' })).toBe(false);
+      expect(runs.all()).toHaveLength(0);
+    });
+
+    it('treats an empty patch as a miss rather than a silent no-op write', async () => {
+      const run = await runOwedLoot(new Date('2026-01-01T00:05:00.000Z'));
+      expect(await runs.updateLootMint(run.id, {})).toBe(false);
+      expect((await runs.findById(run.id))?.lootMint).toBeNull();
+    });
+  });
+
   describe('unknown runs', () => {
     it('reads as null rather than throwing', async () => {
       expect(await runs.findById('999999')).toBeNull();

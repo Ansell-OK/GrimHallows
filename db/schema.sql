@@ -147,9 +147,94 @@ create table if not exists runs (
   )
 );
 
+-- Whether the chain agreed with what we recorded.
+--
+-- WHY THESE ARE NOT PART OF `state`. A run reaches 'resolved' when the backend
+-- has broadcast `reveal-and-resolve` — and a broadcast is not a settlement. The
+-- node accepts any well-formed, funded transaction; a failed `asserts!` inside
+-- the contract aborts it *later*, on chain, and nothing in the request path looks
+-- again. So 'resolved' honestly means "we did our part", and these two columns
+-- carry the separate question of whether the chain then agreed.
+--
+-- This is not hypothetical. On mainnet the contract's `oracle` var still pointed
+-- at the deployer while the backend signed as its own key, so every
+-- `reveal-and-resolve` aborted with `(err u201)` — and three paid entries read as
+-- settled here with rewards that were never minted. The indexer's
+-- `verifySettlements` pass is what closes that gap; see apps/api/src/indexer.
+--
+-- Added by `alter`, not by editing the `create table` above: `create table if not
+-- exists` converges a missing table, never a changed one, so an edit up there
+-- would silently do nothing to a live database (see scripts/db-migrate.mjs).
+alter table runs add column if not exists settlement_verified_at timestamptz;
+-- Null on a settlement the chain accepted. Set to the chain's own tx_status
+-- (e.g. 'abort_by_response') when it did not, which is the operator's cue that a
+-- reward row here describes something that does not exist on chain.
+alter table runs add column if not exists settlement_abort_reason text;
+
+-- Minting a free run's loot drop on chain (docs/09 B7).
+--
+-- WHY A FREE RUN NEEDS ON-CHAIN COLUMNS AT ALL. Loot is the forge's input supply,
+-- so a free-run drop has to be a real NFT — and `character-loot-nft.mint` is
+-- reachable only through `game-core`, which mints only inside
+-- `reveal-and-resolve`, which only settles a run the chain already knows about.
+-- So a free run that draws loot is escorted through a synthetic on-chain run:
+-- `enter-dungeon(FREE_DUNGEON_ID, [player])` → `commit-seed` → `reveal-and-resolve`.
+-- Three sequential confirmations, which is why it is a background worker
+-- (apps/api/src/oracle/freeRunLootMinter.ts) and why each step is persisted: a
+-- restart mid-ceremony has to resume, not start over and mint twice.
+--
+-- THAT ON-CHAIN RUN IS A MINT VEHICLE, NOT A FAIRNESS RECORD. The fight already
+-- happened and was attested off-chain by the oracle signature; nobody acts on the
+-- chain run and its combat-outcome is dictated. The seed it commits is this run's
+-- own already-revealed seed, so the drop stays recomputable from the one seed the
+-- player was shown — there is no second secret, and nothing here is a second,
+-- weaker record of the encounter.
+--
+-- The gate fee is zero and the dungeon is `is-paid false`, so no STX moves and
+-- the sponsor pool is untouched: a free run cannot pay a jackpot (B7 keeps STX
+-- rewards behind the fee, enforced in packages/shared/src/rewards.ts).
+alter table runs add column if not exists loot_mint_chain_run_id bigint;
+-- The chain-assigned run id above is NOT this row's `id`: free ids come from
+-- free_run_id_seq and the chain assigns its own from run-nonce. Both are needed —
+-- `id` is what a player's run URL says, the chain id is what the `loot-minted`
+-- print carries, and conflating them would attach one run's token to another.
+alter table runs add column if not exists loot_mint_enter_tx_id text;
+alter table runs add column if not exists loot_mint_commit_tx_id text;
+alter table runs add column if not exists loot_mint_resolve_tx_id text;
+-- Set when the ceremony cannot proceed — an aborted step, or a chain run id the
+-- entry transaction did not return. Stops the worker retrying forever and is the
+-- operator's cue that a player is owed loot the chain never minted.
+alter table runs add column if not exists loot_mint_failed_reason text;
+
+-- The loot minter's work list: free runs that drew loot and have no mint under
+-- way. Partial and narrow for the same reason as the settlement index — each run
+-- leaves this set after one step and never returns to it.
+create index if not exists runs_free_loot_unminted_idx
+  on runs (resolved_at)
+  where dungeon_type = 'free' and reward_kind = 'loot'
+    and loot_mint_resolve_tx_id is null and loot_mint_failed_reason is null;
+
 create index if not exists runs_party_id_idx on runs (party_id);
 create index if not exists runs_state_idx on runs (state);
 create index if not exists runs_created_by_idx on runs (created_by);
+
+-- The indexer's settlement work list: resolved runs whose transaction has not
+-- been checked yet. Partial and narrow because each settlement is verified once
+-- and then never selected again, so this index stays small no matter how many
+-- runs accumulate.
+--
+-- Since docs/09 B7 the predicate covers `loot_mint_resolve_tx_id` as well. A
+-- free run settles by signature and never has a `resolve_tx_id`, but its drop is
+-- minted by a ceremony whose resolve aborts exactly the way a paid settlement
+-- does, and that transaction needs reading back too. Renamed rather than edited
+-- in place: `create index if not exists` matches on name, so an existing
+-- deployment would keep the old narrow predicate and silently stop answering
+-- this query.
+drop index if exists runs_settlement_unverified_idx;
+create index if not exists runs_settlement_unverified_v2_idx
+  on runs (resolved_at)
+  where state = 'resolved' and settlement_verified_at is null
+    and (resolve_tx_id is not null or loot_mint_resolve_tx_id is not null);
 
 -- The leaderboard's access pattern: resolved runs, newest first, optionally
 -- bounded by a window. Partial because a pending or committed run can never
