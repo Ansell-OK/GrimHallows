@@ -1,0 +1,92 @@
+# Advances the free-run loot ceremony (docs/09 B7, docs/08-deployment.md §4.5).
+#
+# WHY A CI RUNNER IS ACTING AS A CLOCK
+#
+# A free run's drop is an NFT minted on chain by a three-transaction ceremony,
+# one step per pass, each step legal only once the previous confirms. Something
+# has to drive those passes. On the API's host it cannot be `setInterval` — a
+# serverless instance is frozen the moment it responds, so the callback never
+# fires a second time — and it must not hang off request traffic, because a
+# player who earned a drop and closed the tab still has to receive it. That
+# leaves an HTTP request from an external clock, and Vercel's own cron is
+# limited to one invocation per day on the Hobby plan. One pass per day at one
+# step per pass is four days to a wallet.
+#
+# So this workflow is the real driver and the Vercel cron is the backstop. Both
+# call the same endpoint, which runs them through `LootMinterLoop.tick()`, so
+# the two overlapping skips a pass rather than double-broadcasting a step.
+#
+# THREE THINGS THAT MAKE THIS QUIETLY STOP WORKING
+#
+#   1. GitHub disables scheduled workflows on a public repository after 60 days
+#      with no commits. It emails first, and the daily Vercel cron is what keeps
+#      drops landing until someone notices.
+#   2. `schedule` is best-effort, not a guarantee. Runs are dropped or delayed
+#      under load — often by more than the interval itself — so treat the cadence
+#      below as a typical case and never as a deadline. The minutes are offset
+#      off :00 and :30 for that reason: those are the platform's busiest ticks.
+#   3. An unset `CRON_SECRET` repository secret makes every pass a 401. The step
+#      below checks for it explicitly rather than letting that surface as an
+#      authentication failure against a perfectly healthy endpoint.
+#
+# WHAT THE SECRET IS WORTH. It starts a pass; it cannot choose what the pass
+# does. The work list is runs whose reward the table already resolved and
+# recorded, so a leaked secret cannot mint a drop nobody drew, cannot move
+# sponsor-pool STX, and reaches no other route. See src/routes/jobs.ts.
+
+name: loot-mint
+
+on:
+  schedule:
+    # Every 5 minutes, offset off the hour and half-hour. GitHub's minimum
+    # interval is 5 minutes; a finer schedule is silently coerced, not rejected.
+    - cron: '3-58/5 * * * *'
+  # So an operator can force a pass without waiting for the schedule — the first
+  # thing worth doing after setting CRON_SECRET.
+  workflow_dispatch:
+
+# The job reads nothing from the repository and writes nothing back to it. The
+# token it would otherwise be handed is a standing credential this workflow has
+# no use for.
+permissions: {}
+
+# One pass at a time. The endpoint's own guard is per instance and does not span
+# them, so this is the half of the overlap problem that can be solved here.
+concurrency:
+  group: loot-mint
+  cancel-in-progress: false
+
+jobs:
+  pass:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      # Override with a repository variable of the same name to point this at a
+      # different deployment without editing the workflow.
+      API_URL: ${{ vars.API_URL || 'https://grim-hallows-api.vercel.app' }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+    steps:
+      - name: Check the secret is configured
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::CRON_SECRET is not set as a repository secret." \
+                 "Set the same value the API project uses, under" \
+                 "Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+      - name: Advance the loot ceremony by one step
+        run: |
+          # --fail-with-body so a non-2xx fails the job AND still prints what the
+          # API said. Without it a 501 (CRON_SECRET unset in the deployment) and
+          # a 404 (the bundle predates this route) both look like a green run
+          # that minted nothing — the silent failure this whole job exists to
+          # avoid. -sS keeps the progress meter out of the log but not errors.
+          #
+          # The response body carries no secret (asserted in
+          # apps/api/test/jobs.routes.test.ts), so logging it is safe and is the
+          # only record of what each pass did.
+          curl --fail-with-body -sS \
+            --retry 3 --retry-connrefused --max-time 60 \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "$API_URL/jobs/loot-mint"

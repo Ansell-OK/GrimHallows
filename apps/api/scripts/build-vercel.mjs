@@ -119,19 +119,31 @@ writeFileSync(
 // so scheduling it before configuring it is safe but useless. Vercel supplies the
 // secret as an Authorization header on its own; there is nothing to pass here.
 //
-// EVERY MINUTE, WHICH IS A PAID-PLAN FEATURE. A drop takes four passes to reach a
-// wallet, so the interval is most of the player's wait: a minute puts it there in
-// a few, an hour puts it there tomorrow. Vercel's free tier permits daily
-// schedules only and will reject this at deploy time — loudly, which is the right
-// way to find out. Drop to `0 * * * *` if that plan is the constraint, and expect
-// drops to land within a handful of hours rather than minutes.
+// DAILY, WHICH IS A BACKSTOP AND NOT THE DRIVER. Vercel's Hobby plan permits one
+// invocation per day per cron and REJECTS ANYTHING FINER AT DEPLOY TIME — the
+// whole deployment fails, so an every-minute schedule here does not merely run
+// slowly, it ships nothing at all. That is how this was found: production sat on
+// an older bundle with no /jobs/loot-mint in it, 404-ing the route while the code
+// looked deployed.
+//
+// One pass advances one run by one step, so at this interval alone a drop takes
+// four days to reach a wallet. That is a floor on delivery, not a target: the
+// cadence comes from `.github/workflows/loot-mint.yml`, a scheduled GitHub
+// Actions workflow calling the same endpoint every five minutes (free and
+// unmetered on a public repo). This daily pass is what guarantees a drop still
+// lands when that workflow is delayed, was never configured, or has been
+// auto-disabled — GitHub switches off scheduled workflows on a public repo after
+// 60 days without a commit. Both go through LootMinterLoop.tick(), so overlapping
+// them skips rather than double-broadcasts. On a plan that allows minute-level
+// schedules, change this to `* * * * *` and delete the workflow.
+// See docs/08-deployment.md §4.5.
 writeFileSync(
   resolve(OUTPUT_ROOT, 'config.json'),
   JSON.stringify(
     {
       version: 3,
       routes: [{ src: '/(.*)', dest: '/index' }],
-      crons: [{ path: '/jobs/loot-mint', schedule: '* * * * *' }],
+      crons: [{ path: '/jobs/loot-mint', schedule: '17 3 * * *' }],
     },
     null,
     2,
