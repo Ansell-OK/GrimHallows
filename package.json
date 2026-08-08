@@ -24,7 +24,8 @@
     "db:migrate": "node scripts/db-migrate.mjs",
     "seed": "tsx scripts/seed-contracts.mjs",
     "verify-seed": "tsx scripts/verify-seed.mjs",
-    "fund-pool": "tsx scripts/fund-pool.mjs"
+    "fund-pool": "tsx scripts/fund-pool.mjs",
+    "set-oracle": "tsx scripts/set-oracle.mjs"
   },
   "engines": {
     "node": ">=22"
