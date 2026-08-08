@@ -66,6 +66,7 @@ import { registerAdminRoutes } from './routes/admin.js';
 import { registerCharacterRoutes } from './routes/characters.js';
 import { registerDungeonRoutes } from './routes/dungeons.js';
 import { registerForgeRoutes } from './routes/forge.js';
+import { registerImageProxyRoutes } from './routes/imageProxy.js';
 import { registerLeaderboardRoutes } from './routes/leaderboard.js';
 import { registerMapRoutes } from './routes/map.js';
 import { registerPaidClaimRoutes } from './routes/paidDungeonClaim.js';
@@ -305,6 +306,12 @@ export async function buildServer(deps: ServerDeps = {}): Promise<FastifyInstanc
   });
 
   await registerMapRoutes(app, { map });
+
+  // Serves wallet-held NFT art from our own origin, so a gateway that refuses a
+  // cross-origin load or rate-limits a wall of cards stops being the browser's
+  // problem. Unauthenticated by design; `lib/imageProxy.ts` is what keeps it from
+  // being an open relay.
+  await registerImageProxyRoutes(app, {});
 
   // One ForgeService for the player-facing route and for the indexer's recipe
   // mirror. Two readers of `get-recipe` would be two chances to map a tier

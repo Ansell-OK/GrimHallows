@@ -31,7 +31,10 @@ import type {
 } from '@grimhallow/shared';
 import { loadSession } from './session';
 
-const API_URL = (import.meta.env.VITE_API_URL ?? 'http://localhost:8080').replace(/\/+$/, '');
+export const API_URL = (import.meta.env.VITE_API_URL ?? 'http://localhost:8080').replace(
+  /\/+$/,
+  '',
+);
 
 /** An error the API reported in its documented `{ error: { code, message } }` shape. */
 export class ApiRequestError extends Error {

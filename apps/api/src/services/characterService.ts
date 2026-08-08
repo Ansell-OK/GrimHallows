@@ -51,6 +51,7 @@ import {
   type HolderAge,
   type NetworkConfig,
 } from '@grimhallow/shared';
+import { gatewayUrl } from '../lib/contentUrl.js';
 import type { ChainClient, NftHolding, TokenMetadata } from '../lib/hiro.js';
 import type { CharacterCache } from '../repos/characters.js';
 import type { CharacterMintService } from './characterMintService.js';
@@ -67,14 +68,35 @@ function displayName(metadata: TokenMetadata | null, holding: NftHolding): strin
   return `${collection || 'Character'} #${holding.tokenId}`;
 }
 
-function resolveImage(metadata: TokenMetadata | null): string | null {
+/**
+ * The URL a browser should load for a token's art, or null if there isn't one.
+ *
+ * NULL RATHER THAN THE RAW VALUE is the point of this function. Handing back a
+ * scheme no browser can fetch produces an `<img>` that fails after the page has
+ * already committed to showing one — the card renders empty and the player is
+ * told nothing. A null is a decision: the caller shows the class-icon
+ * placeholder instead, which at least looks deliberate.
+ *
+ * Preference order, and why `cached_image` wins: Hiro only populates it when its
+ * metadata service successfully fetched and cached the art, so it is https, on a
+ * CDN, and known-good. `image` is the collection's own value and is usually a
+ * gateway round trip away from being loadable. The trade is that Hiro's copy can
+ * lag a token whose art was replaced — acceptable for display, and the frontend
+ * now falls back loudly if it ever 404s.
+ */
+export function resolveImage(metadata: TokenMetadata | null): string | null {
+  const cached = metadata?.cached_image?.trim();
+  if (cached && cached.toLowerCase().startsWith('https://')) return cached;
+
   const raw = metadata?.image?.trim();
   if (!raw) return null;
-  // ipfs:// is not fetchable by a browser; route it through a public gateway.
-  if (raw.startsWith('ipfs://')) {
-    return `https://ipfs.io/ipfs/${raw.slice('ipfs://'.length).replace(/^ipfs\//, '')}`;
-  }
-  return raw;
+
+  // Already bytes — no host, no gateway, nothing to resolve. Checked before
+  // `gatewayUrl`, which has no notion of `data:` and would refuse it. Safe in an
+  // <img>: script inside an SVG does not execute when loaded as an image.
+  if (raw.toLowerCase().startsWith('data:image/')) return raw;
+
+  return gatewayUrl(raw);
 }
 
 /**

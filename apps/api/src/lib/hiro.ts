@@ -12,8 +12,17 @@
  * moves money — those checks live in the contracts, where they cannot lag.
  */
 
-import { hexToCV, cvToValue, serializeCV, uintCV, type ClarityValue } from '@stacks/transactions';
+import {
+  ClarityType,
+  hexToCV,
+  cvToValue,
+  serializeCV,
+  uintCV,
+  type ClarityValue,
+} from '@stacks/transactions';
+import { gatewayUrl, substituteTokenId } from './contentUrl.js';
 import { upstreamUnavailable } from './errors.js';
+import { assertProxyableUrl } from './imageProxy.js';
 
 export interface NftHolding {
   /** e.g. `SP2X0T....my-nfts::my-nft` */
@@ -30,6 +39,19 @@ export interface NftHolding {
 export interface TokenMetadata {
   readonly name?: string;
   readonly image?: string;
+  /**
+   * Hiro's own https copy of `image`, present when its metadata service managed
+   * to fetch and cache the art.
+   *
+   * Worth preferring over `image` for display: `image` is routinely `ipfs://` or
+   * `ar://`, which no browser can fetch, and the public gateways those rewrite to
+   * are slow and rate-limited. This is already https, already on a CDN, and
+   * already known-good — Hiro only fills it in if the fetch succeeded.
+   *
+   * Snake_case because it is Hiro's wire field passed straight through, the same
+   * way `trait_type` is SIP-16's.
+   */
+  readonly cached_image?: string;
   readonly attributes?: readonly { readonly trait_type?: string; readonly value?: unknown }[];
 }
 
@@ -188,6 +210,19 @@ const TX_PAGE_SIZE = 50;
 const NFT_HISTORY_PAGE_SIZE = 50;
 /** Bound on the indexer's backward walk through a contract's history. */
 const MAX_TX_PAGES = 20;
+
+/**
+ * Deadline for the token-uri fallback's gateway fetch.
+ *
+ * Shorter than `DEFAULT_TIMEOUT_MS` on purpose. This is a best-effort second
+ * attempt at *display* metadata, and it runs once per token in a wallet — a
+ * public IPFS gateway that has decided to be slow must not be able to add ten
+ * seconds per card to a character list that is already correct without it.
+ */
+const TOKEN_URI_FETCH_TIMEOUT_MS = 5_000;
+
+/** Cap on a metadata JSON body. SIP-16 metadata is a few hundred bytes. */
+const MAX_METADATA_BYTES = 256 * 1024;
 
 /** `SP...contract::asset` → its parts, or null if it isn't that shape. */
 export function parseAssetIdentifier(
@@ -411,25 +446,180 @@ export class HiroChainClient implements ChainClient {
     }
   }
 
+  /**
+   * A token's display metadata, from Hiro's index or — failing that — the chain.
+   *
+   * WHY THERE IS A FALLBACK AT ALL. Hiro's metadata index is incomplete, and it
+   * does not say so: an unindexed token answers `200 {}`, not 404. That is not a
+   * rare edge either. Of the collections this game supports, `giga-pepe` is
+   * absent entirely and `giga-pepe-v2` is indexed only up to roughly token 2000,
+   * so a holder of #2135 got a card with no art and no explanation — which is
+   * what sent this function looking for a second source.
+   *
+   * The second source is the chain itself, which is authoritative and complete:
+   * `get-token-uri` is SIP-009 and every one of these collections implements it.
+   * It costs a read-only call plus one gateway fetch, both of which land in
+   * `character_stats_cache` behind the caller, so it happens once per token per
+   * cache lifetime rather than once per page load.
+   *
+   * Still null on failure, in every path. Metadata is display-only here — stat
+   * derivation is deliberately metadata-independent (`stats.ts`, anti-spoofing)
+   * — so a token with none is a complete, playable character, and failing the
+   * character list because a gateway was slow would be strictly worse than a
+   * placeholder image.
+   */
   async getTokenMetadata(contractId: string, tokenId: string): Promise<TokenMetadata | null> {
     interface MetadataResponse {
       token_uri?: string;
       metadata?: {
         name?: string;
         image?: string;
+        cached_image?: string;
         attributes?: { trait_type?: string; value?: unknown }[];
       };
     }
 
+    let indexed: TokenMetadata | null = null;
     try {
       const body = await this.fetchJson<MetadataResponse>(
         `/metadata/v1/nft/${encodeURIComponent(contractId)}/${encodeURIComponent(tokenId)}`,
       );
-      return body.metadata ?? null;
+      indexed = body.metadata ?? null;
     } catch {
-      // Missing or unindexed metadata is normal, not an error: stat derivation
-      // treats it as absent, and the anti-spoofing design means a character
-      // with no metadata is still a complete, playable character.
+      // Unreachable or 404 — indistinguishable from unindexed at this point, and
+      // both are answered the same way: try the chain.
+      indexed = null;
+    }
+
+    // Present but imageless counts as a miss. The whole reason a caller wants
+    // this is the picture, and an indexed row carrying only a name is exactly
+    // the half-populated state Hiro leaves behind when its own fetch failed.
+    if (indexed?.image || indexed?.cached_image) return indexed;
+
+    const onChain = await this.metadataFromTokenUri(contractId, tokenId);
+    if (!onChain) return indexed;
+    // Hiro's row wins on the fields it has; the chain fills the gaps. Nothing is
+    // discarded, because an indexed `name` is as valid as a fetched one. The
+    // image can only come from the chain here — the early return above already
+    // took every case where Hiro had one.
+    return indexed ? { ...onChain, ...indexed, image: onChain.image } : onChain;
+  }
+
+  /**
+   * Read `get-token-uri` off chain, fetch the JSON it points at, return it.
+   *
+   * Three things here are the actual work, and each was a way this silently
+   * returned nothing before it was handled:
+   *
+   *   - SIP-16's literal `{id}`. Collections return ONE uri for the whole
+   *     collection with a placeholder in it. Fetched unchanged it 404s.
+   *   - The scheme. `get-token-uri` returns `ipfs://ipfs/Qm…` as often as https;
+   *     `gatewayUrl` is what makes it fetchable, and returns null rather than a
+   *     guess for anything it has no gateway for.
+   *   - `assertProxyableUrl`. This is the API fetching a URL named by an
+   *     arbitrary contract — the same SSRF primitive `/image-proxy` guards, minus
+   *     the browser. Anyone can deploy a contract whose `get-token-uri` returns
+   *     `https://169.254.169.254/…`; the response body would not reach the
+   *     player, but the *request* would still be made from inside our network,
+   *     by a process holding `ORACLE_PRIVATE_KEY`. So it goes through the same
+   *     allowlist, and its 400 is swallowed into null rather than surfaced.
+   *
+   * `data:application/json` token uris are not handled. None of the eight
+   * supported collections uses one, and the ones that do are on-chain-art
+   * collections whose images are SVGs the proxy refuses anyway.
+   */
+  private async metadataFromTokenUri(
+    contractId: string,
+    tokenId: string,
+  ): Promise<TokenMetadata | null> {
+    const uri = await this.readTokenUri(contractId, tokenId);
+    if (!uri) return null;
+
+    const url = gatewayUrl(substituteTokenId(uri, tokenId));
+    if (!url) return null;
+
+    try {
+      assertProxyableUrl(url);
+    } catch {
+      // A contract pointing at a private address, a non-https scheme, or an odd
+      // port. Not our problem to report — the token simply has no metadata.
+      return null;
+    }
+
+    interface TokenUriJson {
+      name?: unknown;
+      image?: unknown;
+      attributes?: unknown;
+    }
+
+    let body: TokenUriJson;
+    try {
+      const response = await fetch(url, {
+        headers: { accept: 'application/json' },
+        signal: AbortSignal.timeout(TOKEN_URI_FETCH_TIMEOUT_MS),
+      });
+      if (!response.ok) return null;
+      const declared = Number(response.headers.get('content-length'));
+      if (Number.isFinite(declared) && declared > MAX_METADATA_BYTES) return null;
+      const text = await response.text();
+      // Checked after reading as well as before: `content-length` is optional and
+      // can lie, and this parses whatever arrives.
+      if (text.length > MAX_METADATA_BYTES) return null;
+      body = JSON.parse(text) as TokenUriJson;
+    } catch {
+      // Gateway timeout, 404, non-JSON body, or a body over the cap. All the
+      // same answer.
+      return null;
+    }
+
+    if (!body || typeof body !== 'object') return null;
+
+    const image = typeof body.image === 'string' ? body.image : undefined;
+    const name = typeof body.name === 'string' ? body.name : undefined;
+    if (!image && !name) return null;
+
+    // `attributes` is passed through only in SIP-16's own shape. Collections use
+    // `trait`/`type`/`key` for the same field, but `metadataBonus` matches on
+    // `trait_type` alone, so remapping them would start moving stats — and the
+    // one holder-influenced input into stat derivation is not something to widen
+    // as a side effect of a display fix (stats.ts, ANTI-SPOOFING).
+    const attributes = Array.isArray(body.attributes)
+      ? (body.attributes as { trait_type?: string; value?: unknown }[]).filter(
+          (a) => a && typeof a === 'object',
+        )
+      : undefined;
+
+    return { name, image, attributes };
+  }
+
+  /**
+   * `get-token-uri` for a token, or null if the contract has no readable one.
+   *
+   * SIP-009 types this as `(response (optional (string-ascii 256)) uint)`, so
+   * there are two wrappers to unpick before the string, and a `none` is a
+   * legitimate answer meaning the collection publishes no metadata.
+   */
+  private async readTokenUri(contractId: string, tokenId: string): Promise<string | null> {
+    let id: bigint;
+    try {
+      id = BigInt(tokenId);
+    } catch {
+      return null; // Non-numeric token id — nothing to ask the contract about.
+    }
+
+    try {
+      const result = await this.callReadOnly({
+        contractId,
+        functionName: 'get-token-uri',
+        functionArgsHex: [`0x${serializeCV(uintCV(id))}`],
+      });
+      const inner = result.type === ClarityType.ResponseOk ? result.value : result;
+      if (inner.type !== ClarityType.OptionalSome) return null;
+      if (inner.value.type !== ClarityType.StringASCII) return null;
+      return inner.value.value;
+    } catch {
+      // A contract without `get-token-uri` at all, or a node that refused the
+      // call. Neither is worth failing a character list over.
       return null;
     }
   }

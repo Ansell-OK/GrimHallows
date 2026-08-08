@@ -25,6 +25,7 @@ import {
   loadActiveCharacter,
   saveActiveCharacter,
 } from '@/lib/session';
+import { displayImageUrl } from '@/lib/images';
 import type { DerivedCharacter } from '@grimhallow/shared';
 
 const CLASS_FILTERS: readonly (CharClass | 'all')[] = [
@@ -41,7 +42,11 @@ function toCardCharacter(c: DerivedCharacter) {
     id: characterKey(c),
     name: c.name,
     tokenId: c.tokenId,
-    image: c.imageUrl ?? undefined,
+    // A wallet-held token's art lives on a third-party host, so it goes through
+    // the API's image proxy; `displayImageUrl` leaves anything already local
+    // alone. Precedence is unchanged — native art, then the class-icon
+    // placeholder when there is none.
+    image: displayImageUrl(c.imageUrl),
     rarity: c.rarity as Rarity,
     charClass: c.charClass as CharClass,
     stats: c.stats,

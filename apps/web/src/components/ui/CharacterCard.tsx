@@ -49,9 +49,32 @@ interface CharacterCardProps {
   className?: string;
 }
 
+/**
+ * URLs already reported. A roster re-render, a filter change or a remount would
+ * otherwise re-warn for every card every time, which trains you to ignore the
+ * warning — the opposite of what a loud failure is for.
+ */
+const warnedImages = new Set<string>();
+
+function warnImageFailed(url: string, character: Character) {
+  if (warnedImages.has(url)) return;
+  warnedImages.add(url);
+  console.warn(
+    `[CharacterCard] Image failed to load for "${character.name}" (token #${character.tokenId}): ${url}\n` +
+      'Showing the class-icon placeholder. If this is a wallet-held NFT, check the API ' +
+      '/image-proxy response — it names the reason it refused (blocked host, not an image, too large).',
+  );
+}
+
 export function CharacterCard({ character, selected, onClick, compact, className }: CharacterCardProps) {
   const colorClass = rarityColors[character.rarity];
-  
+
+  // The failed URL rather than a boolean, so the flag clears by itself when the
+  // image changes — a mint whose rarity climbs gets a new portrait URL, and that
+  // fresh URL deserves its own attempt rather than inheriting the old verdict.
+  const [failedUrl, setFailedUrl] = React.useState<string | null>(null);
+  const showImage = Boolean(character.image) && failedUrl !== character.image;
+
   return (
     <motion.div
       whileHover={{ scale: 1.02, y: -4 }}
@@ -65,11 +88,28 @@ export function CharacterCard({ character, selected, onClick, compact, className
       )}
     >
       <div className="absolute inset-0 bg-gradient-to-t from-obsidian via-obsidian/80 to-transparent z-10" />
-      
-      {/* Art Placeholder */}
+
+      {/* Art, or the class-icon placeholder when there is none or it failed to load. */}
       <div className="absolute inset-0 bg-stone flex items-center justify-center">
-        {character.image ? (
-          <div className="w-full h-full bg-cover bg-center opacity-70" style={{ backgroundImage: `url(${character.image})` }} />
+        {showImage ? (
+          // An <img> rather than a CSS background-image specifically so `onError`
+          // exists: a background that 404s fails silently, which is how a broken
+          // metadata URL used to reach a player as an empty card with nothing in
+          // the console. alt="" because the name and class are rendered as text
+          // just below — a screen reader announcing them twice is noise.
+          <img
+            src={character.image}
+            alt=""
+            loading="lazy"
+            decoding="async"
+            className="w-full h-full object-cover opacity-70"
+            onError={() => {
+              const url = character.image;
+              if (!url) return;
+              warnImageFailed(url, character);
+              setFailedUrl(url);
+            }}
+          />
         ) : (
           <div className="w-full h-full flex flex-col items-center justify-center bg-obsidian/50 opacity-60">
             <ClassIcon charClass={character.charClass} className="w-20 h-20 mb-4 opacity-50" />

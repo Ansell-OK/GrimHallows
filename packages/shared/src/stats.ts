@@ -61,6 +61,8 @@ const MAX_METADATA_BONUS_PER_STAT = 4;
 export interface NftMetadata {
   readonly name?: string;
   readonly image?: string;
+  /** Hiro's cached https copy of `image`. Display only, like `name` and `image`. */
+  readonly cached_image?: string;
   readonly attributes?: readonly { readonly trait_type?: string; readonly value?: unknown }[];
 }
 
