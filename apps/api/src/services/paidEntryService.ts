@@ -221,25 +221,35 @@ export class PaidEntryService {
       throw conflict('MISSING_PARTY_ARG', 'enter-dungeon was called with only one argument.');
     }
     const partyRepr = tx.functionArgsRepr[1].trim();
-    // The second arg is a `(list 4 principal)`. Extract the one principal it
-    // contains. A paid entry with more than one is a party run, which is refused
-    // at entry time by the route — this path is only reached by a solo entry.
-    const principalMatch = /^\(list\s+([A-Z0-9]+)\)$/.exec(partyRepr);
-    if (!principalMatch) {
+    // The second arg is a `(list 4 principal)`. Clarity renders each principal
+    // with a leading apostrophe — the chain returns `(list 'SP1… 'SP2…)`, not
+    // `(list SP1… SP2…)`. An earlier parser matched `[A-Z0-9]+` with no quote and
+    // so rejected every real entry as malformed while the fixtures (hand-written
+    // without the apostrophe) passed. Parse the list generically and strip the
+    // quote from each member.
+    const listMatch = /^\(list\s+(.+)\)$/.exec(partyRepr);
+    if (!listMatch) {
       throw conflict(
         'MALFORMED_PARTY',
         `Second argument to enter-dungeon is ${partyRepr}, not a list of principals.`,
       );
     }
-    const entrantAddress = principalMatch[1];
-    if (entrantAddress !== tx.senderAddress) {
-      // The party list names someone other than the payer. That is allowed on
-      // chain — paying for another player is not an attack — but this path
-      // expects solo entries only, and a solo entry's party list contains only
-      // the payer.
+    const party = listMatch[1].trim().split(/\s+/).map((member) => member.replace(/^'/, ''));
+    // Every member must look like a Stacks principal (`S` + c32 body). This is
+    // what rejects a list whose contents are not principals at all, e.g. `(list u5)`.
+    if (!party.every((member) => /^S[0-9A-Z]+$/.test(member))) {
+      throw conflict(
+        'MALFORMED_PARTY',
+        `Second argument to enter-dungeon is ${partyRepr}, not a list of principals.`,
+      );
+    }
+    // Party runs are not enabled yet: the list must be exactly the payer. Naming
+    // other principals is allowed on chain — paying for another player is not an
+    // attack — but this path expects solo entries only.
+    if (party.length !== 1 || party[0] !== tx.senderAddress) {
       throw conflict(
         'PARTY_MISMATCH',
-        'This entry names a different address in its party list. Multi-party entries are not yet supported.',
+        'This entry names a party other than you alone. Multi-party entries are not yet supported.',
       );
     }
 

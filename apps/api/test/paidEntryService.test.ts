@@ -68,7 +68,7 @@ function enterTx(overrides: Partial<ChainTransaction> = {}): ChainTransaction {
     senderAddress: PLAYER,
     contractId: GAME_CORE,
     functionName: 'enter-dungeon',
-    functionArgsRepr: [`u${PAID_DUNGEON_ID}`, `(list ${PLAYER})`],
+    functionArgsRepr: [`u${PAID_DUNGEON_ID}`, `(list '${PLAYER})`],
     resultRepr: '(ok u1)',
     events: [printEvent(GATE_FEE), transferEvent(GATE_FEE, PLAYER, DEPLOYER)],
     blockHeight: 12_345,
@@ -232,7 +232,7 @@ describe('PaidEntryService', () => {
         chainReturning(
           enterTx({
             senderAddress: DEPLOYER,
-            functionArgsRepr: [`u${PAID_DUNGEON_ID}`, `(list ${DEPLOYER})`],
+            functionArgsRepr: [`u${PAID_DUNGEON_ID}`, `(list '${DEPLOYER})`],
             events: [printEvent(GATE_FEE)],
           }),
         ),
@@ -363,7 +363,7 @@ describe('PaidEntryService', () => {
 
     it('refuses a dungeon id that is not a uint', async () => {
       const err = await ingestError(
-        chainReturning(enterTx({ functionArgsRepr: ['"one"', `(list ${PLAYER})`] })),
+        chainReturning(enterTx({ functionArgsRepr: ['"one"', `(list '${PLAYER})`] })),
       );
       expect(err.code).toBe('MALFORMED_DUNGEON_ID');
     });
@@ -412,7 +412,7 @@ describe('PaidEntryService', () => {
     it('refuses a party naming someone other than the payer', async () => {
       const err = await ingestError(
         chainReturning(
-          enterTx({ functionArgsRepr: [`u${PAID_DUNGEON_ID}`, `(list ${DEPLOYER})`] }),
+          enterTx({ functionArgsRepr: [`u${PAID_DUNGEON_ID}`, `(list '${DEPLOYER})`] }),
         ),
       );
       expect(err.code).toBe('PARTY_MISMATCH');
