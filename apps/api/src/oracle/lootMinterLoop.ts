@@ -91,7 +91,19 @@ export class LootMinterLoop {
     this.config = { ...DEFAULT_LOOT_MINTER_LOOP_CONFIG, ...config };
   }
 
-  /** One pass, skipped if another is already going. Never throws. */
+  /**
+   * One pass, skipped if another is already going.
+   *
+   * Returns null for a skip — an ordinary outcome, and `/jobs/loot-mint` answers it
+   * 200 so a cron dashboard does not read the guard working as the job breaking.
+   *
+   * Rejects only if the store underneath it is broken: `runOnce()` absorbs a
+   * failure on an individual run, so a rejection from there means the batch query
+   * failed, and a rejection from `acquire()` means the lease table is unreachable.
+   * Both are deliberately loud. Failing the pass turns them into a red cron run,
+   * whereas skipping quietly would stop every drop while reporting success — and
+   * running anyway, without the lease, is the double-broadcast this exists to stop.
+   */
   async tick(): Promise<LootMintReport | null> {
     if (this.running) {
       // Not a quota concern like the indexer's equivalent — this one is the
