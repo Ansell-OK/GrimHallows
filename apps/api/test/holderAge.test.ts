@@ -89,6 +89,12 @@ function fakeChain(options: FakeChainOptions = {}): ChainClient & { blockCalls: 
       if (options.throwOn === 'history') throw new Error('hiro is down');
       return options.acquisitionBlock ?? null;
     },
+    // Tenure is the whole subject here and the rarity floor is a separate input,
+    // so this fake never resolves one — see `unresolvedMintBlock` in
+    // helpers/chain.ts for why null is an answer rather than a missing stub.
+    async getNftMintBlock(): Promise<null> {
+      return null;
+    },
     async getTokenMetadata(): Promise<null> {
       return null;
     },

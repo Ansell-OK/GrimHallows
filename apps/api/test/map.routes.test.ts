@@ -24,7 +24,7 @@ import { buildServer } from '../src/server.js';
 import { MemorySpawnStore } from '../src/repos/spawns.js';
 import type { ChainClient, ChainTransaction } from '../src/lib/hiro.js';
 import { TEST_ORACLE_KEY, testOracleSigner } from './helpers/oracle.js';
-import { unsupportedChainWrites } from './helpers/chain.js';
+import { unresolvedMintBlock, unsupportedChainWrites } from './helpers/chain.js';
 
 const GATE_FEE = 1_000_000n; // 1 STX
 const POOL = 42_350_000n; // 42.35 STX
@@ -65,6 +65,7 @@ class FakeChain implements ChainClient {
     unsupportedChainWrites().getTransaction;
   broadcastRawTx: (rawTxHex: string) => Promise<string> = unsupportedChainWrites().broadcastRawTx;
   listContractCalls: ChainClient['listContractCalls'] = unsupportedChainWrites().listContractCalls;
+  getNftMintBlock: ChainClient['getNftMintBlock'] = unresolvedMintBlock().getNftMintBlock;
 }
 
 const inFuture = (ms: number) => new Date(Date.now() + ms);

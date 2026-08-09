@@ -18,7 +18,7 @@
 
 import { StacksOracleSigner, type OracleSigner } from '../../src/oracle/attestation.js';
 import type { ChainClient, NftHolding, TokenMetadata } from '../../src/lib/hiro.js';
-import { unsupportedChainWrites } from './chain.js';
+import { unresolvedMintBlock, unsupportedChainWrites } from './chain.js';
 
 /** Devnet `wallet_3`. Never used on testnet or mainnet, and worth nothing. */
 export const TEST_ORACLE_KEY =
@@ -54,6 +54,7 @@ export function stubChain(overrides: Partial<ChainClient> = {}): ChainClient {
       throw new Error('callReadOnly is not stubbed in this test');
     },
     ...unsupportedChainWrites(),
+    ...unresolvedMintBlock(),
     ...overrides,
   } as ChainClient;
 }

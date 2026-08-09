@@ -28,7 +28,7 @@ import { buildServer } from '../src/server.js';
 import { issueToken } from '../src/lib/jwt.js';
 import type { ChainClient, ChainTransaction, NftHolding } from '../src/lib/hiro.js';
 import { TEST_ORACLE_KEY, testOracleSigner } from './helpers/oracle.js';
-import { unsupportedChainWrites } from './helpers/chain.js';
+import { unresolvedMintBlock, unsupportedChainWrites } from './helpers/chain.js';
 import { deserializePostCondition, type StxPostCondition } from './helpers/postConditions.js';
 
 const JWT_SECRET = 'test-jwt-secret';
@@ -88,6 +88,7 @@ class FakeChain implements ChainClient {
     unsupportedChainWrites().getTransaction;
   broadcastRawTx: (rawTxHex: string) => Promise<string> = unsupportedChainWrites().broadcastRawTx;
   listContractCalls: ChainClient['listContractCalls'] = unsupportedChainWrites().listContractCalls;
+  getNftMintBlock: ChainClient['getNftMintBlock'] = unresolvedMintBlock().getNftMintBlock;
 }
 
 describe('/forge routes', () => {

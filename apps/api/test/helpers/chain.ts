@@ -12,9 +12,12 @@
  * reason in reverse: an empty array is a *valid* answer meaning "this contract
  * has no history", so a route that started walking chain history by accident
  * would silently pass with an empty result instead of failing.
+ *
+ * `unresolvedMintBlock` is the exception that proves the rule — see its own note
+ * for why a null there is a specified answer rather than an unstubbed call.
  */
 
-import type { ChainClient, ChainTransaction } from '../../src/lib/hiro.js';
+import type { ChainClient, ChainTransaction, MintBlock } from '../../src/lib/hiro.js';
 import { Cl, ClarityType, type ClarityValue } from '@stacks/transactions';
 
 export interface ChainWriteStubs {
@@ -33,6 +36,28 @@ export function unsupportedChainWrites(): ChainWriteStubs {
     },
     async listContractCalls(params): Promise<ChainTransaction[]> {
       throw new Error(`listContractCalls(${params.contractId}) is not stubbed for this test`);
+    },
+  };
+}
+
+/**
+ * A mint-block lookup that never resolves one.
+ *
+ * Returns null rather than throwing, unlike the stubs above, because null is a
+ * *specified* answer here and not a gap: it is the documented degrade for a mint
+ * whose block the API cannot see yet, and it means "derive with no rarity floor"
+ * (`stats.ts` `effectiveRarity`). So a test that reaches this gets a character at
+ * its tenure tier — the same thing production serves in that situation — instead
+ * of a fabricated floor that would move stats no test asked to move.
+ *
+ * A test that cares about the floor overrides it with a real block hash. That is
+ * the only way a floor appears in a fixture, which is what keeps the ones that
+ * don't mention rarity floors reading exactly as they did before stats-v4.
+ */
+export function unresolvedMintBlock(): Pick<ChainClient, 'getNftMintBlock'> {
+  return {
+    async getNftMintBlock(): Promise<MintBlock | null> {
+      return null;
     },
   };
 }

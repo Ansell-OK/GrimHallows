@@ -204,6 +204,132 @@ describe('deriveCharacter (one computation, consistent fields)', () => {
   });
 });
 
+describe('the mint-rarity floor (stats-v4, 01-game-design.md#4b)', () => {
+  // Our own mint contract. The floor is a function of (contractId, tokenId,
+  // mintSeed) — the seed being the hash of the block that confirmed the mint,
+  // which is what stops the roll being precomputable off a sequential token id
+  // (rarity.ts, MINT_FLOOR_TIERS). Under SEED_A these three ids roll known tiers
+  // and stay pinned: 15 -> Rare, 3 -> Uncommon, 0 -> Common. Two things switch
+  // the floor on and BOTH are required: a classSource of 'mint' (set by passing a
+  // minted class) and a resolved seed. The eight supported collections never roll
+  // one whatever seed they are handed.
+  const MINT = 'SP000000000000000000002Q6VF78.character-nft';
+  const SEED_A = '0x4f1c2b8a9d3e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8';
+  const RARE_ID = '15';
+  const UNCOMMON_ID = '3';
+  const COMMON_ID = '0';
+
+  it('floors a fresh mint at its rolled tier instead of Common', () => {
+    // Held zero days, so pure tenure would be Common. The Rare floor overrides it.
+    const c = deriveCharacter({
+      contractId: MINT,
+      tokenId: RARE_ID,
+      mintedClassId: 'warrior',
+      holdDays: 0,
+      mintSeed: SEED_A,
+    });
+    expect(c.classSource).toBe('mint');
+    expect(c.rarityTier).toBe('rare');
+    expect(c.rarityTier).not.toBe(rarityFromHoldDays(c.holdDays)); // the floor did the raising
+  });
+
+  it('scales stats by the floor tier, identical to reaching that tier by tenure', () => {
+    // effectiveRarity collapses "Rare by floor at day 0" and "Rare by tenure at
+    // day 90" to the same tier, so the multiplier — and thus every stat — matches
+    // byte for byte. This pins that the floor feeds the stat multiplier, not just
+    // the published badge.
+    const byFloor = deriveStats(MINT, RARE_ID, null, 0, 'warrior', STATS_ALGO_VERSION, SEED_A);
+    const byTenure = deriveStats(MINT, RARE_ID, null, 90, 'warrior', STATS_ALGO_VERSION, SEED_A);
+    expect(byFloor).toEqual(byTenure);
+  });
+
+  it('lets tenure climb above the floor — max(floor, age), never min', () => {
+    const of = (holdDays: number) =>
+      deriveCharacter({
+        contractId: MINT,
+        tokenId: RARE_ID,
+        mintedClassId: 'warrior',
+        holdDays,
+        mintSeed: SEED_A,
+      });
+    const fresh = of(0);
+    const aged = of(800);
+    expect(fresh.rarityTier).toBe('rare');
+    expect(aged.rarityTier).toBe('mythic'); // 800 days > 730, and mythic > rare
+    expect(aged.stats.hp).toBeGreaterThan(fresh.stats.hp);
+    expect(aged.stats.str).toBeGreaterThan(fresh.stats.str);
+  });
+
+  it('never lowers a character below its tenure tier', () => {
+    // A Common-floored token held into Epic is Epic, not dragged back to Common.
+    const c = deriveCharacter({
+      contractId: MINT,
+      tokenId: COMMON_ID,
+      mintedClassId: 'mage',
+      holdDays: 200,
+      mintSeed: SEED_A,
+    });
+    expect(c.rarityTier).toBe('epic');
+  });
+
+  it('applies each rolled floor tier at day zero', () => {
+    const at = (tokenId: string) =>
+      deriveCharacter({
+        contractId: MINT,
+        tokenId,
+        mintedClassId: 'rogue',
+        holdDays: 0,
+        mintSeed: SEED_A,
+      }).rarityTier;
+    expect(at(RARE_ID)).toBe('rare');
+    expect(at(UNCOMMON_ID)).toBe('uncommon');
+    expect(at(COMMON_ID)).toBe('common');
+  });
+
+  it('derives with NO floor when the seed has not been resolved yet', () => {
+    // The degrade from effectiveRarity: a mint whose confirming block the API has
+    // not fetched yet serves at the rarity it can prove — tenure alone — rather
+    // than at a guessed floor. This is the case that made the seed safe to add to
+    // a live derivation, so it is pinned explicitly for absent, null and empty.
+    // A Rare-floored token reading as Common until the lookup lands is a visible
+    // correction upward; a floor that changed after being published would not be.
+    for (const mintSeed of [undefined, null, '']) {
+      const c = deriveCharacter({
+        contractId: MINT,
+        tokenId: RARE_ID,
+        mintedClassId: 'warrior',
+        holdDays: 0,
+        mintSeed,
+      });
+      expect(c.classSource).toBe('mint');
+      expect(c.rarityTier).toBe('common');
+    }
+    // And the stats match the seedless derivation exactly, so a row cached before
+    // the seed arrives is v3-shaped rather than half-floored.
+    expect(deriveStats(MINT, RARE_ID, null, 0, 'warrior', STATS_ALGO_VERSION, null)).toEqual(
+      deriveStats(MINT, RARE_ID, null, 0, 'warrior'),
+    );
+  });
+
+  it('leaves supported collections pure-tenure — no floor is ever rolled', () => {
+    // The invariant that keeps v4 byte-identical to v3 for the eight collections:
+    // a supported token's tier is exactly its hold-duration tier, with no floor
+    // taking a max against it. The seed is passed in on purpose — a supported
+    // token must ignore one even if a caller supplies it, because classSource is
+    // the only thing that may switch the floor on.
+    for (const days of [0, 30, 90, 180, 365, 730]) {
+      const c = deriveCharacter({
+        contractId: CONTRACT,
+        tokenId: RARE_ID,
+        holdDays: days,
+        mintSeed: SEED_A,
+      });
+      expect(c.classSource).toBe('supported_collection');
+      expect(c.rarityTier).toBe(rarityFromHoldDays(days));
+    }
+  });
+});
+
 describe('an unsupported collection has no stats at all', () => {
   it('throws rather than defaulting to a class', () => {
     // A default here would be the hash fallback under a shorter name: every NFT
@@ -252,7 +378,7 @@ describe('golden vectors (pin the derivation)', () => {
   it('matches known token -> known stats', () => {
     // If this fails, every character's stats just changed. Bump
     // STATS_ALGO_VERSION rather than editing a rule in place.
-    expect(STATS_ALGO_VERSION).toBe('stats-v3');
+    expect(STATS_ALGO_VERSION).toBe('stats-v4');
     expect({
       token1Fresh: deriveStats(CONTRACT, '1', null, 0),
       token1Epic: deriveStats(CONTRACT, '1', null, 200),

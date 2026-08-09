@@ -19,7 +19,7 @@ import { buildServer } from '../src/server.js';
 import { MemorySpawnStore } from '../src/repos/spawns.js';
 import type { ChainClient, ChainTransaction } from '../src/lib/hiro.js';
 import { TEST_ORACLE_KEY, testOracleSigner } from './helpers/oracle.js';
-import { unsupportedChainWrites } from './helpers/chain.js';
+import { unresolvedMintBlock, unsupportedChainWrites } from './helpers/chain.js';
 
 /**
  * Answers the map's two reads and fails everything else.
@@ -55,6 +55,7 @@ class FakeChain implements ChainClient {
     unsupportedChainWrites().getTransaction;
   broadcastRawTx: (rawTxHex: string) => Promise<string> = unsupportedChainWrites().broadcastRawTx;
   listContractCalls: ChainClient['listContractCalls'] = unsupportedChainWrites().listContractCalls;
+  getNftMintBlock: ChainClient['getNftMintBlock'] = unresolvedMintBlock().getNftMintBlock;
 }
 
 async function build(onDemand: boolean, spawns: MemorySpawnStore): Promise<FastifyInstance> {

@@ -26,7 +26,7 @@ import { buildServer } from '../src/server.js';
 import { upstreamUnavailable, type ApiError } from '../src/lib/errors.js';
 import type { ChainClient, ChainTransaction, NftHolding, TokenMetadata } from '../src/lib/hiro.js';
 import { TEST_ORACLE_KEY, testOracleSigner } from './helpers/oracle.js';
-import { unsupportedChainWrites } from './helpers/chain.js';
+import { unresolvedMintBlock, unsupportedChainWrites } from './helpers/chain.js';
 import { CHARACTER_COLLECTION, UNLISTED_COLLECTION } from './helpers/collections.js';
 
 const ADDRESS = 'ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM';
@@ -81,6 +81,7 @@ class FakeChain implements ChainClient {
     unsupportedChainWrites().getTransaction;
   broadcastRawTx: (rawTxHex: string) => Promise<string> = unsupportedChainWrites().broadcastRawTx;
   listContractCalls: ChainClient['listContractCalls'] = unsupportedChainWrites().listContractCalls;
+  getNftMintBlock: ChainClient['getNftMintBlock'] = unresolvedMintBlock().getNftMintBlock;
 }
 
 describe('GET /characters', () => {

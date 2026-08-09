@@ -24,7 +24,7 @@ import {
 import { ForgeService } from '../src/services/forgeService.js';
 import type { ApiError } from '../src/lib/errors.js';
 import type { ChainClient, ChainTransaction, NftHolding } from '../src/lib/hiro.js';
-import { unsupportedChainWrites } from './helpers/chain.js';
+import { unresolvedMintBlock, unsupportedChainWrites } from './helpers/chain.js';
 
 function recipeTuple(input: {
   inputTier: number;
@@ -96,6 +96,7 @@ class FakeChain implements ChainClient {
     unsupportedChainWrites().getTransaction;
   broadcastRawTx: (rawTxHex: string) => Promise<string> = unsupportedChainWrites().broadcastRawTx;
   listContractCalls: ChainClient['listContractCalls'] = unsupportedChainWrites().listContractCalls;
+  getNftMintBlock: ChainClient['getNftMintBlock'] = unresolvedMintBlock().getNftMintBlock;
 }
 
 const stacks = getNetworkConfig('devnet');

@@ -16,7 +16,7 @@ import { verifyToken } from '../src/lib/jwt.js';
 import { MemoryAuthStore } from '../src/repos/auth.js';
 import type { ChainClient } from '../src/lib/hiro.js';
 import { TEST_ORACLE_KEY, testOracleSigner } from './helpers/oracle.js';
-import { unsupportedChainWrites } from './helpers/chain.js';
+import { unresolvedMintBlock, unsupportedChainWrites } from './helpers/chain.js';
 
 const PRIVATE_KEY = '753b7cc01a1a2e86221266a154af739463fce51219d97e4f856cd7200c3bd2a601';
 const OTHER_KEY = '7287ba251d44a4d3fd9276c88ce34c5c52a038955511cccaf77e61068649c17801';
@@ -33,6 +33,7 @@ const chainStub: ChainClient = {
     throw new Error('not used');
   },
   ...unsupportedChainWrites(),
+  ...unresolvedMintBlock(),
 };
 
 function toHex(bytes: Uint8Array): string {

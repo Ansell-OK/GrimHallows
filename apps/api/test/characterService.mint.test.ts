@@ -31,7 +31,7 @@ import { HolderAgeService } from '../src/services/holderAgeService.js';
 import { NullHolderAgeRepo } from '../src/repos/holderAge.js';
 import type { CharacterCache, CharacterCacheEntry } from '../src/repos/characters.js';
 import type { ChainClient, ChainTransaction, NftHolding, TokenMetadata } from '../src/lib/hiro.js';
-import { unsupportedChainWrites } from './helpers/chain.js';
+import { unresolvedMintBlock, unsupportedChainWrites } from './helpers/chain.js';
 
 const stacks = getNetworkConfig('devnet');
 const CHARACTER_NFT = buildContractId(stacks, 'characterNft');
@@ -99,6 +99,7 @@ class FakeChain implements ChainClient {
     unsupportedChainWrites().getTransaction;
   broadcastRawTx: (rawTxHex: string) => Promise<string> = unsupportedChainWrites().broadcastRawTx;
   listContractCalls: ChainClient['listContractCalls'] = unsupportedChainWrites().listContractCalls;
+  getNftMintBlock: ChainClient['getNftMintBlock'] = unresolvedMintBlock().getNftMintBlock;
 }
 
 /** A real cache, so the round-trip through `put` and `get` is exercised. */

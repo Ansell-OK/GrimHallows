@@ -129,6 +129,21 @@ export interface StxTransfer {
   readonly amountUstx: string;
 }
 
+/**
+ * The block a token was minted in.
+ *
+ * Both fields are permanent facts about a token, which is what makes this
+ * cacheable forever (`nft_mint_seeds`). The hash is the value the rarity floor is
+ * seeded with; the height is carried alongside it so a stored seed can be traced
+ * back to a block a human can look up, and so a bad row is recognisable rather
+ * than being an opaque hex string.
+ */
+export interface MintBlock {
+  readonly height: number;
+  /** `0x`-prefixed, as Hiro serializes it. Normalized again before it is hashed. */
+  readonly hash: string;
+}
+
 export interface ChainClient {
   getNftHoldings(address: string): Promise<NftHolding[]>;
   /**
@@ -157,6 +172,34 @@ export interface ChainClient {
     tokenId: string;
     owner: string;
   }): Promise<number | null>;
+  /**
+   * The block that MINTED a token, with its hash — the seed for the mint-rarity
+   * floor (`packages/shared/src/rarity.ts`, `mintFloorFromSeed`).
+   *
+   * The mirror image of `getNftAcquisitionBlock` in the one way that matters:
+   * that one wants the NEWEST event because tenure belongs to the current holder,
+   * and this one wants the OLDEST because a mint happens once. They are separate
+   * methods rather than one with a flag because they also cache differently —
+   * this answer is immutable and permanently cacheable, while an acquisition block
+   * moves on every transfer.
+   *
+   * WHY THE HASH AND NOT THE HEIGHT OR THE TXID. All three identify the mint, and
+   * only the hash is unguessable when the mint is signed. Heights are enumerable
+   * ahead of time, and a txid is chosen by the minter — they build and sign the
+   * transaction, so they can grind its nonce until the resulting floor comes up
+   * Rare, which is the precompute this seed exists to close. A block hash is
+   * fixed by whoever mines the block, after the transaction is already committed.
+   *
+   * Null when the mint cannot be established — an unconfirmed mint, a token that
+   * does not exist, an unreachable Hiro. The caller serves the token with no floor
+   * and retries later (stats.ts `effectiveRarity`); it must never substitute a
+   * seed of its own, because a guessed floor is one that changes when the real
+   * seed arrives.
+   */
+  getNftMintBlock(params: {
+    assetIdentifier: string;
+    tokenId: string;
+  }): Promise<MintBlock | null>;
   getTokenMetadata(contractId: string, tokenId: string): Promise<TokenMetadata | null>;
   callReadOnly(params: {
     contractId: string;
@@ -237,6 +280,23 @@ export function parseAssetIdentifier(
 export function parseTokenIdRepr(repr: string): string | null {
   const match = /^u(\d+)$/.exec(repr.trim());
   return match ? match[1] : null;
+}
+
+/**
+ * A token id as the `?value=` filter on Hiro's NFT routes wants it: the
+ * hex-serialized Clarity uint.
+ *
+ * Null for a non-numeric id. Both callers below query the same history route for
+ * the same token, so they build the filter through one function — two spellings
+ * of "serialize this token id" is two chances to query a different token than
+ * the one asked about.
+ */
+function tokenIdValueHex(tokenId: string): string | null {
+  try {
+    return `0x${serializeCV(uintCV(BigInt(tokenId)))}`;
+  } catch {
+    return null;
+  }
 }
 
 /** A transaction exactly as Hiro serializes it, on either the single or list route. */
@@ -423,18 +483,11 @@ export class HiroChainClient implements ChainClient {
       }[];
     }
 
-    let valueHex: string;
-    try {
-      valueHex = `0x${serializeCV(uintCV(BigInt(params.tokenId)))}`;
-    } catch {
-      return null;
-    }
+    const valueHex = tokenIdValueHex(params.tokenId);
+    if (!valueHex) return null;
 
     try {
-      const body = await this.fetchJson<HistoryPage>(
-        `/extended/v1/tokens/nft/history?asset_identifier=${encodeURIComponent(params.assetIdentifier)}` +
-          `&value=${encodeURIComponent(valueHex)}&limit=${NFT_HISTORY_PAGE_SIZE}`,
-      );
+      const body = await this.fetchJson<HistoryPage>(this.nftHistoryPath(params.assetIdentifier, valueHex));
 
       // Hiro returns this newest-first, so the first match is the most recent
       // acquisition — see the interface note on why "most recent" is required
@@ -444,6 +497,98 @@ export class HiroChainClient implements ChainClient {
     } catch {
       return null;
     }
+  }
+
+  /** One spelling of the history query, shared by both readers of it. */
+  private nftHistoryPath(assetIdentifier: string, valueHex: string, offset = 0): string {
+    const limit = offset === 0 ? NFT_HISTORY_PAGE_SIZE : 1;
+    return (
+      `/extended/v1/tokens/nft/history?asset_identifier=${encodeURIComponent(assetIdentifier)}` +
+      `&value=${encodeURIComponent(valueHex)}&limit=${limit}&offset=${offset}`
+    );
+  }
+
+  async getNftMintBlock(params: {
+    assetIdentifier: string;
+    tokenId: string;
+  }): Promise<MintBlock | null> {
+    const valueHex = tokenIdValueHex(params.tokenId);
+    if (!valueHex) return null;
+
+    try {
+      const height = await this.findMintHeight(params.assetIdentifier, valueHex);
+      if (height === null) return null;
+
+      const hash = await this.getBlockHash(height);
+      // A height with no readable hash is the same outcome as no mint at all:
+      // there is no seed, so there is no floor yet. Returning the height alone
+      // would invite a caller to seed the roll with something enumerable.
+      return hash ? { height, hash } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The height of a token's mint event, walking to the OLDEST entry in its history.
+   *
+   * Hiro serves this route newest-first with a `total`, so the mint is the last
+   * row rather than the first. When the history fits in one page that row is
+   * already in hand; when it does not, `offset = total - 1` jumps straight to it
+   * rather than paging through every transfer. Two requests at worst, whatever the
+   * token's transfer count.
+   *
+   * The event is checked to actually BE a mint. A token whose history has been
+   * truncated, or whose oldest visible event is a transfer, yields null — the
+   * degrade — instead of seeding the floor from a transfer block, which would be
+   * re-rollable by sending the token to yourself.
+   */
+  private async findMintHeight(assetIdentifier: string, valueHex: string): Promise<number | null> {
+    interface HistoryPage {
+      total?: number;
+      results?: { asset_event_type?: string; block_height?: number }[];
+    }
+
+    const first = await this.fetchJson<HistoryPage>(this.nftHistoryPath(assetIdentifier, valueHex));
+    const results = first.results ?? [];
+    if (results.length === 0) return null;
+
+    const total = typeof first.total === 'number' ? first.total : results.length;
+    let oldest = results[results.length - 1];
+
+    if (total > results.length) {
+      const last = await this.fetchJson<HistoryPage>(
+        this.nftHistoryPath(assetIdentifier, valueHex, total - 1),
+      );
+      const row = (last.results ?? [])[0];
+      if (!row) return null;
+      oldest = row;
+    }
+
+    if (oldest.asset_event_type !== 'mint') return null;
+    return typeof oldest.block_height === 'number' ? oldest.block_height : null;
+  }
+
+  /**
+   * The hash of a block, or null.
+   *
+   * `burn_block_hash` is preferred for the same reason `getBlockTimestamp` prefers
+   * `burn_block_time`: it is the Bitcoin anchor, present on every Stacks version,
+   * and the value the chain agrees on across a Stacks-side micro-reorg.
+   * `index_block_hash` is accepted as a second choice because it is equally
+   * unguessable at signing time — the security property holds on either — and a
+   * resolved seed is stored permanently, so whichever field answered first for a
+   * token keeps answering for it forever.
+   */
+  private async getBlockHash(blockHeight: number): Promise<string | null> {
+    interface BlockResponse {
+      burn_block_hash?: string;
+      index_block_hash?: string;
+    }
+
+    const body = await this.fetchJson<BlockResponse>(`/extended/v1/block/by_height/${blockHeight}`);
+    const hash = body.burn_block_hash ?? body.index_block_hash;
+    return typeof hash === 'string' && /^(0x)?[0-9a-fA-F]{16,}$/.test(hash.trim()) ? hash.trim() : null;
   }
 
   /**

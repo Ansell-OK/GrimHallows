@@ -13,7 +13,7 @@ import { Cl, ClarityType, type ClarityValue } from '@stacks/transactions';
 import { CONTRACT_NAMES, getNetworkConfig, MAX_POWER_UP_TIER } from '@grimhallow/shared';
 import { PowerUpOwnershipError, PowerUpService } from '../src/services/powerUpService.js';
 import type { ChainClient, ChainTransaction, NftHolding } from '../src/lib/hiro.js';
-import { unsupportedChainWrites } from './helpers/chain.js';
+import { unresolvedMintBlock, unsupportedChainWrites } from './helpers/chain.js';
 
 const stacks = getNetworkConfig('devnet');
 const LOOT_CONTRACT = `${stacks.deployer}.${CONTRACT_NAMES.characterLootNft}`;
@@ -88,6 +88,7 @@ class FakeChain implements ChainClient {
     unsupportedChainWrites().getTransaction;
   broadcastRawTx: (rawTxHex: string) => Promise<string> = unsupportedChainWrites().broadcastRawTx;
   listContractCalls: ChainClient['listContractCalls'] = unsupportedChainWrites().listContractCalls;
+  getNftMintBlock: ChainClient['getNftMintBlock'] = unresolvedMintBlock().getNftMintBlock;
 }
 
 function makeService(chain: FakeChain): PowerUpService {

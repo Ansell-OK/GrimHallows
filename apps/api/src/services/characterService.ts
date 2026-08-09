@@ -55,6 +55,7 @@ import { gatewayUrl } from '../lib/contentUrl.js';
 import type { ChainClient, NftHolding, TokenMetadata } from '../lib/hiro.js';
 import type { CharacterCache } from '../repos/characters.js';
 import type { CharacterMintService } from './characterMintService.js';
+import type { MintSeedService } from './mintSeedService.js';
 import { UNKNOWN_HOLDER_AGE, holdingKey, type HolderAgeService } from './holderAgeService.js';
 
 /** Bound on concurrent metadata fetches, to stay friendly to Hiro's limits. */
@@ -137,12 +138,19 @@ export function deriveIdentity(
  * deprecated aliases for the web app (04-backend-api-spec.md#2). They are read
  * off the same `deriveCharacter` result, so they are two names for one value and
  * cannot disagree — which is the only version of an alias worth shipping.
+ *
+ * `mintSeed` is the mint block's hash for one of our own tokens, and null for
+ * everything else — including one of ours whose mint has not confirmed yet. Null
+ * means no rarity floor at all rather than a guessed one (stats.ts
+ * `effectiveRarity`), so a token briefly reads at its tenure tier and then
+ * corrects upward once the seed resolves.
  */
 export function withHolderAge(
   identity: CharacterIdentity,
   metadata: TokenMetadata | null,
   age: HolderAge,
   mintedClassId: string | null = null,
+  mintSeed: string | null = null,
 ): DerivedCharacter {
   const core = deriveCharacterCore({
     contractId: identity.contractId,
@@ -150,6 +158,7 @@ export function withHolderAge(
     metadata,
     holdDays: age.holdDays,
     mintedClassId,
+    mintSeed,
   });
 
   return {
@@ -187,6 +196,16 @@ export interface CharacterServiceDeps {
    * supply it.
    */
   readonly characterMint?: CharacterMintService;
+  /**
+   * Resolves the mint block hash that seeds a minted token's rarity floor.
+   *
+   * Optional on the same terms as `characterMint`, and with a gentler failure: a
+   * deployment without it derives our own mints with no floor rather than dropping
+   * them, since a floor is a bonus on top of tenure and its absence is the degrade
+   * the derivation already handles. Any deployment that sells mints should supply
+   * it, or every mint reads as Common on day one.
+   */
+  readonly mintSeeds?: MintSeedService;
 }
 
 export class CharacterService {
@@ -271,6 +290,14 @@ export class CharacterService {
   ): Promise<DerivedCharacter> {
     const age = ages.get(holdingKey(holding.contractId, holding.tokenId)) ?? UNKNOWN_HOLDER_AGE;
 
+    // Resolved on both the cache-hit and cache-miss paths, and deliberately NOT
+    // stored in `character_stats_cache`. That table's rows are shared across
+    // wallets and live for hours; the seed has its own permanent, write-once table
+    // (`nft_mint_seeds`) whose whole point is that the value never moves. Reading
+    // it here costs one indexed query per minted token once resolved, and keeps
+    // the two caches answering the questions they are each keyed for.
+    const mintSeed = await this.resolveMintSeed(holding);
+
     const cached = await this.deps.cache
       .get(holding.contractId, holding.tokenId, STATS_ALGO_VERSION)
       .catch(() => null);
@@ -283,7 +310,7 @@ export class CharacterService {
     if (cached) {
       const cachedMintedClass =
         cached.identity.classSource === 'mint' ? cached.identity.classId : null;
-      return withHolderAge(cached.identity, cached.metadata, age, cachedMintedClass);
+      return withHolderAge(cached.identity, cached.metadata, age, cachedMintedClass, mintSeed);
     }
 
     // Only our own collection has a class to look up; a curated-collection token
@@ -300,7 +327,25 @@ export class CharacterService {
     // A cache write failure must not fail the request: the derivation is pure,
     // so the answer is already correct without it.
     await this.deps.cache.put({ identity, metadata }).catch(() => {});
-    return withHolderAge(identity, metadata, age, mintedClassId);
+    return withHolderAge(identity, metadata, age, mintedClassId, mintSeed);
+  }
+
+  /**
+   * The mint-block seed for one of our own tokens, or null.
+   *
+   * Null for a curated-collection token by construction — they have no floor —
+   * and null for one of ours whose mint the indexer has not surfaced yet, which
+   * derives at its tenure tier until it does. Swallows failures for the same
+   * reason `deriveOne` degrades rather than throwing: no floor is a character
+   * served slightly weak, while an exception here is a character-select screen
+   * that does not render at all.
+   */
+  private async resolveMintSeed(holding: NftHolding): Promise<string | null> {
+    if (holding.contractId !== this.characterContractId) return null;
+    if (!this.deps.mintSeeds) return null;
+    return this.deps.mintSeeds
+      .forToken(holding.contractId, holding.tokenId)
+      .catch(() => null);
   }
 }
 

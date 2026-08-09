@@ -35,6 +35,7 @@ import type { RunOracle, RunView } from '../oracle/runOracle.js';
 import type { CharacterRef, RunRecord } from '../repos/runs.js';
 import type { ChainClient } from '../lib/hiro.js';
 import type { CharacterMintService } from './characterMintService.js';
+import type { MintSeedService } from './mintSeedService.js';
 import { UNKNOWN_HOLDER_AGE, type HolderAgeService } from './holderAgeService.js';
 
 /**
@@ -66,6 +67,16 @@ export interface CombatServiceDeps {
    * contract read they never reach.
    */
   readonly characterMint?: CharacterMintService;
+  /**
+   * Resolves the mint block hash seeding a minted character's rarity floor.
+   *
+   * Optional, and absent means every minted character fights with no floor —
+   * an underestimate, and the same one the derivation already applies to an
+   * unresolved seed. Supplying it here matters because the character LIST
+   * supplies it: two services deriving one token from different inputs would
+   * show a player a Rare card and then field a Common in the fight.
+   */
+  readonly mintSeeds?: MintSeedService;
 }
 
 export class CombatService {
@@ -108,9 +119,22 @@ export class CombatService {
     // A curated-collection token gets its class from the allowlist and costs no
     // chain call. Anything else that got this far can only be one of our own
     // mints, whose class lives on chain — so that is the one case worth reading.
-    const mintedClassId = isSupportedCollection(character.contractId)
-      ? null
-      : await (this.deps.characterMint?.mintedClass(character.tokenId) ?? Promise.resolve(null));
+    const isOurMint = !isSupportedCollection(character.contractId);
+    const mintedClassId = isOurMint
+      ? await (this.deps.characterMint?.mintedClass(character.tokenId) ?? Promise.resolve(null))
+      : null;
+
+    // The same seed the character list derived the card from, so the fight is
+    // fought at the rarity the player was shown. Resolved here rather than passed
+    // in because the setup is frozen onto the run and must be reproducible from
+    // chain alone by a verifier. Null degrades to no floor, exactly as it does on
+    // the card — an unlucky moment for a just-minted token, and the same answer in
+    // both places, which is what stops the fight and the card disagreeing.
+    const mintSeed = isOurMint
+      ? await (this.deps.mintSeeds
+          ?.forToken(character.contractId, character.tokenId)
+          .catch(() => null) ?? Promise.resolve(null))
+      : null;
 
     const derived = deriveCharacterCore({
       contractId: character.contractId,
@@ -118,6 +142,7 @@ export class CombatService {
       metadata,
       holdDays: age.holdDays,
       mintedClassId,
+      mintSeed,
     });
 
     return {

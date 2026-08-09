@@ -15,12 +15,16 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
+  ASSET_NAMES,
   CONTRACT_NAMES,
   DEPLOY_ORDER,
   PAID_DUNGEON_GATE_FEE_USTX,
   SEED_DUNGEONS,
   SEED_RECIPES,
+  assetIdentifier,
   contractId,
   getNetworkConfig,
 } from '../src/index.js';
@@ -84,6 +88,53 @@ describe('contractId', () => {
     for (const key of DEPLOY_ORDER) {
       expect(contractId(cfg, key)).toBe(`${MAINNET_DEPLOYER}.${CONTRACT_NAMES[key]}`);
     }
+  });
+});
+
+/**
+ * SIP-009 asset names, pinned against the contracts that declare them.
+ *
+ * These are read straight out of the `.clar` sources rather than restated here,
+ * because a copy of a constant is only as good as the day it was copied. The
+ * failure this guards is quiet in a way most config mistakes are not: Hiro's NFT
+ * routes key on `contract-id::asset-name`, and a wrong asset name is not an error
+ * but an EMPTY RESULT SET. A token's whole history comes back as "no history",
+ * which the mint-seed lookup reads as "not confirmed yet" and degrades on — so
+ * every minted character would silently lose its rarity floor, forever, with
+ * nothing anywhere reporting a fault.
+ *
+ * The names are also not derivable: a contract called `character-nft` declares an
+ * asset called `grimhallow-character`.
+ */
+describe('asset names', () => {
+  /** Every `define-non-fungible-token` name in a contract source. */
+  function declaredAssets(contractName: string): string[] {
+    const source = readFileSync(
+      fileURLToPath(new URL(`../../../contracts/contracts/${contractName}.clar`, import.meta.url)),
+      'utf8',
+    );
+    return [...source.matchAll(/\(define-non-fungible-token\s+([a-zA-Z0-9-]+)/g)].map((m) => m[1]);
+  }
+
+  it('matches what each contract actually declares', () => {
+    for (const [key, assetName] of Object.entries(ASSET_NAMES)) {
+      const contractName = CONTRACT_NAMES[key as keyof typeof CONTRACT_NAMES];
+      expect(declaredAssets(contractName)).toContain(assetName);
+    }
+  });
+
+  it('is not merely the contract name, which is why it has to be recorded', () => {
+    // If these ever coincided, the constant would look redundant and be at risk
+    // of someone "simplifying" it away.
+    expect(ASSET_NAMES.characterNft).not.toBe(CONTRACT_NAMES.characterNft);
+    expect(ASSET_NAMES.characterNft).toBe('grimhallow-character');
+  });
+
+  it('builds the `contract::asset` form Hiro expects', () => {
+    const cfg = getNetworkConfig('mainnet');
+    expect(assetIdentifier(cfg, 'characterNft')).toBe(
+      `${MAINNET_DEPLOYER}.character-nft::grimhallow-character`,
+    );
   });
 });
 

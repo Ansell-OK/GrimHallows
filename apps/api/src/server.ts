@@ -14,6 +14,7 @@ import {
   CONTRACT_NAMES,
   UnsupportedCollectionError,
   contractId,
+  assetIdentifier as buildAssetIdentifier,
   type NetworkConfig,
 } from '@grimhallow/shared';
 import { config, loadOracleKey, ownerAddressOrNull } from './config.js';
@@ -37,6 +38,11 @@ import {
   PostgresHolderAgeRepo,
   type HolderAgeRepo,
 } from './repos/holderAge.js';
+import {
+  NullMintSeedRepo,
+  PostgresMintSeedRepo,
+  type MintSeedRepo,
+} from './repos/mintSeeds.js';
 import {
   MemoryForgeHistoryStore,
   PostgresForgeHistoryStore,
@@ -64,6 +70,7 @@ import { LootMinterLoop, type LootMinterLoopConfig } from './oracle/lootMinterLo
 import { OnDemandTicker } from './services/onDemand.js';
 import { CharacterMintService } from './services/characterMintService.js';
 import { CharacterService } from './services/characterService.js';
+import { MintSeedService } from './services/mintSeedService.js';
 import { CombatService } from './services/combatService.js';
 import { HolderAgeService } from './services/holderAgeService.js';
 import { ForgeService } from './services/forgeService.js';
@@ -88,6 +95,7 @@ export interface ServerDeps {
   readonly authStore?: AuthStore;
   readonly characterCache?: CharacterCache;
   readonly holderAgeRepo?: HolderAgeRepo;
+  readonly mintSeedRepo?: MintSeedRepo;
   readonly spawnStore?: SpawnStore;
   readonly runStore?: RunStore;
   /**
@@ -216,6 +224,11 @@ export async function buildServer(deps: ServerDeps = {}): Promise<FastifyInstanc
   const holderAgeRepo =
     deps.holderAgeRepo ??
     (config.databaseUrl ? new PostgresHolderAgeRepo() : new NullHolderAgeRepo());
+  // Permanent and write-once — see `nft_mint_seeds`. Without Postgres this is the
+  // null repo, so a fresh-clone boot re-reads the mint block per request rather
+  // than caching it: correct, just chattier, exactly like the holder-age repo.
+  const mintSeedRepo =
+    deps.mintSeedRepo ?? (config.databaseUrl ? new PostgresMintSeedRepo() : new NullMintSeedRepo());
   const spawnStore =
     deps.spawnStore ?? (config.databaseUrl ? new PostgresSpawnStore() : new MemorySpawnStore());
   const runStore =
@@ -296,7 +309,18 @@ export async function buildServer(deps: ServerDeps = {}): Promise<FastifyInstanc
     log: (message, detail) => app.log.info(detail ?? {}, message),
   });
 
-  const combat = new CombatService({ oracle, chain, holderAge, characterMint });
+  // One MintSeedService for the character list and combat setup, for the reason
+  // the two above are shared: the seed decides a minted character's rarity floor,
+  // so two resolvers would be two chances to show a Rare on the card and field a
+  // Common in the fight.
+  const mintSeeds = new MintSeedService({
+    chain,
+    repo: mintSeedRepo,
+    assetIdentifier: buildAssetIdentifier(stacks, 'characterNft'),
+    log: (message, detail) => app.log.info(detail ?? {}, message),
+  });
+
+  const combat = new CombatService({ oracle, chain, holderAge, characterMint, mintSeeds });
 
   // One PowerUpService for every route that reads or verifies a loadout: the
   // inventory listing, a free entry and a paid claim must never disagree about
@@ -338,6 +362,7 @@ export async function buildServer(deps: ServerDeps = {}): Promise<FastifyInstanc
       stacks,
       holderAge,
       characterMint,
+      mintSeeds,
     }),
     powerUps,
     characterMint,

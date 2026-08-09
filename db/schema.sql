@@ -451,6 +451,36 @@ create index if not exists nft_holder_age_pending_idx
   on nft_holder_age_cache (checked_at)
   where source = 'fallback_pending';
 
+-- The block that minted one of our own `character-nft` tokens, with its hash.
+-- PERMANENT, for the same reason `block_timestamps` is: a mint happens once and
+-- no later transaction can move it.
+--
+-- The hash is what the mint-rarity floor is rolled from (stats-v4;
+-- `mintFloorFromSeed` in packages/shared/src/rarity.ts). It is seeded from chain
+-- rather than derived from `(contract, token)` because token ids are sequential
+-- and `get-last-token-id` is public: a floor computable from identity alone lets
+-- anyone hash `lastId + 1` off chain, learn the outcome before paying, and mint
+-- only on a Rare. A block hash is not knowable when the mint is signed and not
+-- choosable by the minter, so the published 60/30/10 table describes the odds
+-- everyone actually faces.
+--
+-- Permanence here is correctness, not speed. A seed that could resolve to a
+-- different value later would be a rarity floor that changed under a player who
+-- had already been shown it, so the row is written once (`do nothing` on
+-- conflict) and read forever.
+--
+-- Only rows for RESOLVED seeds exist. An unresolved token is simply absent, and
+-- absence already means "serve no floor and ask again" — unlike the holder-age
+-- cache, which stores its failures because they need a retry worklist.
+create table if not exists nft_mint_seeds (
+  nft_contract_id text not null,
+  nft_token_id text not null,
+  mint_block_height bigint not null,
+  mint_seed text not null,
+  resolved_at timestamptz not null default now(),
+  primary key (nft_contract_id, nft_token_id)
+);
+
 -- Cross-instance mutual exclusion for scheduled jobs (docs/09 B7).
 --
 -- One row per job, held for a lease rather than for a session. The free-run loot

@@ -138,6 +138,35 @@ export function contractId(cfg: NetworkConfig, key: ContractKey): string {
   return `${cfg.deployer}.${CONTRACT_NAMES[key]}`;
 }
 
+/**
+ * SIP-009 asset (token class) names, as each contract's
+ * `define-non-fungible-token` declares them.
+ *
+ * These are NOT the contract names and are not derivable from them — a contract
+ * called `character-nft` defines an asset called `grimhallow-character`. Hiro's
+ * NFT routes key on `contract-id::asset-name`, so a wrong asset name here is not
+ * an error but an empty result set: a token history that looks like a token with
+ * no history. Recorded next to the contract names for the same reason those are
+ * here, and pinned by a test against the `.clar` sources.
+ */
+export const ASSET_NAMES = {
+  characterLootNft: 'character-loot',
+  characterNft: 'grimhallow-character',
+} as const satisfies Partial<Record<ContractKey, string>>;
+
+export type AssetKey = keyof typeof ASSET_NAMES;
+
+/**
+ * Hiro's asset identifier for a collection, e.g.
+ * `ST1...GZGM.character-nft::grimhallow-character`.
+ *
+ * The form every `/extended/v1/tokens/nft/*` route wants. Built here rather than
+ * concatenated at each call site so the `::` and the asset name are written once.
+ */
+export function assetIdentifier(cfg: NetworkConfig, key: AssetKey): string {
+  return `${contractId(cfg, key)}::${ASSET_NAMES[key]}`;
+}
+
 /** Explorer link for a transaction — used by Screen 9's "view on-chain" links. */
 export function explorerTxUrl(cfg: NetworkConfig, txId: string): string {
   const id = txId.startsWith('0x') ? txId : `0x${txId}`;
