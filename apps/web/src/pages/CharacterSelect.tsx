@@ -25,6 +25,7 @@ import {
   loadActiveCharacter,
   saveActiveCharacter,
 } from '@/lib/session';
+import { portraitFor } from '@/lib/portraits';
 import { displayImageUrl } from '@/lib/images';
 import type { DerivedCharacter } from '@grimhallow/shared';
 
@@ -38,15 +39,21 @@ const CLASS_FILTERS: readonly (CharClass | 'all')[] = [
 
 /** Adapts the API's derived character to the card component's prop shape. */
 function toCardCharacter(c: DerivedCharacter) {
+  // Our own mints show a class+rarity portrait that tracks their rarity; every
+  // other token keeps its native NFT image. The portrait is recomputed here on
+  // each render from the live `rarity`, so a token that has aged into a higher
+  // tier picks up the matching art without any cache to invalidate.
+  //
+  // A portrait is a bundled asset and loads directly; a wallet-held token's art
+  // lives on a third-party host, so it goes through the API's image proxy —
+  // `displayImageUrl` tells the two apart. Same precedence as before: portrait
+  // first, native art second, class-icon placeholder if neither resolves.
+  const portrait = portraitFor(c.classSource, c.charClass, c.rarity);
   return {
     id: characterKey(c),
     name: c.name,
     tokenId: c.tokenId,
-    // A wallet-held token's art lives on a third-party host, so it goes through
-    // the API's image proxy; `displayImageUrl` leaves anything already local
-    // alone. Precedence is unchanged — native art, then the class-icon
-    // placeholder when there is none.
-    image: displayImageUrl(c.imageUrl),
+    image: displayImageUrl(portrait ?? c.imageUrl),
     rarity: c.rarity as Rarity,
     charClass: c.charClass as CharClass,
     stats: c.stats,
