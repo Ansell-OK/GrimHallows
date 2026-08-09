@@ -14,7 +14,10 @@
 #
 # So this workflow is the real driver and the Vercel cron is the backstop. Both
 # call the same endpoint, which runs them through `LootMinterLoop.tick()`, so
-# the two overlapping skips a pass rather than double-broadcasting a step.
+# the two overlapping skips a pass rather than double-broadcasting a step —
+# guarded by an in-process flag and, across instances, by a lease row in
+# `job_leases`. The `concurrency` group below is the third layer and the weakest:
+# it only serialises this workflow against itself.
 #
 # THREE THINGS THAT MAKE THIS QUIETLY STOP WORKING
 #

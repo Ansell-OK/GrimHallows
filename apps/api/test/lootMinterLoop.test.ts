@@ -12,11 +12,18 @@
  *
  * IT NEVER TAKES THE PROCESS DOWN. An unhandled rejection inside a `setInterval`
  * callback is fatal in Node, and a loot ceremony is not worth the server.
+ *
+ * IT NEVER OVERLAPS ANOTHER INSTANCE EITHER. The flag that stops the first is a
+ * boolean on one object, which was the whole world when a `setInterval` on a host
+ * that owned its process was the only driver. Two HTTP schedulers against a
+ * serverless fleet is not that world, so the same guard is asserted a second time
+ * across two loop objects sharing a lease store.
  */
 
 import { describe, expect, it, vi } from 'vitest';
 import { FreeRunLootMinter, type LootMintReport } from '../src/oracle/freeRunLootMinter.js';
 import { LootMinterLoop } from '../src/oracle/lootMinterLoop.js';
+import { MemoryJobLeaseStore } from '../src/repos/jobLeases.js';
 
 const EMPTY: LootMintReport = {
   considered: 0,
@@ -150,5 +157,128 @@ describe('LootMinterLoop', () => {
 
     await loop.tick();
     expect(logs).toEqual(['free-run loot mint pass complete']);
+  });
+
+  describe('the cross-instance lease', () => {
+    /**
+     * Two loops sharing one lease store — the shape of two warm serverless
+     * instances, which is what the `running` flag above cannot see. Both are
+     * driven by the same two schedulers, so "another instance is mid-pass" is a
+     * state the endpoint reaches in production and never reaches in a test that
+     * only ever builds one loop.
+     */
+    function twoInstances(minterA: FreeRunLootMinter, minterB: FreeRunLootMinter) {
+      const leases = new MemoryJobLeaseStore();
+      return {
+        leases,
+        a: new LootMinterLoop(minterA, {}, () => {}, leases),
+        b: new LootMinterLoop(minterB, {}, () => {}, leases),
+      };
+    }
+
+    it('does not start a pass while another instance holds the lease', async () => {
+      let release: (() => void) | null = null;
+      let passesB = 0;
+      const { a, b } = twoInstances(
+        fakeMinter(
+          () => new Promise<LootMintReport>((resolve) => {
+            release = () => resolve(EMPTY);
+          }),
+        ),
+        fakeMinter(async () => {
+          passesB++;
+          return EMPTY;
+        }),
+      );
+
+      const first = a.tick();
+      // The race this exists to stop: B would read the same run at the same
+      // recorded step A is mid-broadcast on, and broadcast it again. At the
+      // resolve step that is a second NFT for one drop; at any step it is an
+      // aborted transaction that can be the one recorded, parking a run as failed
+      // after the player was shown their reward.
+      expect(await b.tick()).toBeNull();
+      expect(passesB).toBe(0);
+
+      release!();
+      await first;
+    });
+
+    it('hands the lease back when the pass ends, rather than holding it out', async () => {
+      // The TTL is two minutes and the tick interval is one. A lease held for its
+      // full term would halve the cadence — and every skipped pass is a step a
+      // player waits an extra interval for.
+      let passesB = 0;
+      const { a, b } = twoInstances(
+        fakeMinter(async () => EMPTY),
+        fakeMinter(async () => {
+          passesB++;
+          return EMPTY;
+        }),
+      );
+
+      await a.tick();
+      await b.tick();
+      expect(passesB).toBe(1);
+    });
+
+    it('hands the lease back after a pass that threw', async () => {
+      // Released in a `finally`, for the same reason the local flag is. A failure
+      // that kept the lease would block every instance for a full TTL, and the
+      // first pass after a transient Hiro blip is the one draining a backlog.
+      let passesB = 0;
+      const { a, b } = twoInstances(
+        fakeMinter(async () => {
+          throw new Error('hiro 503');
+        }),
+        fakeMinter(async () => {
+          passesB++;
+          return EMPTY;
+        }),
+      );
+
+      await expect(a.tick()).rejects.toThrow('hiro 503');
+      await b.tick();
+      expect(passesB).toBe(1);
+    });
+
+    it('completes the pass even if the lease cannot be released', async () => {
+      // A tidy-up failure is not a failed pass. Through `/jobs/loot-mint` a throw
+      // here would be a non-2xx in a cron dashboard for work that succeeded, and
+      // the lease expires on its own anyway.
+      const logs: string[] = [];
+      const leases = new MemoryJobLeaseStore();
+      leases.release = async () => {
+        throw new Error('pooler closed the connection');
+      };
+      const loop = new LootMinterLoop(
+        fakeMinter(async () => ({ ...EMPTY, considered: 1, minted: 1 })),
+        {},
+        (message) => logs.push(message),
+        leases,
+      );
+
+      expect((await loop.tick())?.minted).toBe(1);
+      expect(logs).toContain('free-run loot mint lease release failed; it will expire');
+    });
+
+    it('runs normally with no lease store at all', async () => {
+      // Null is the single-process case, and the default. A deployment that can
+      // only ever have one instance needs no round trip to be told so.
+      let passes = 0;
+      const loop = new LootMinterLoop(
+        fakeMinter(async () => {
+          passes++;
+          return EMPTY;
+        }),
+        {},
+        () => {},
+        null,
+      );
+
+      await loop.tick();
+      await loop.tick();
+      expect(passes).toBe(2);
+    });
   });
 });

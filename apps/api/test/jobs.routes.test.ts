@@ -293,8 +293,10 @@ describe('/jobs/loot-mint', () => {
     it('does not start a second pass on top of one still in flight', async () => {
       // Two overlapping passes read the same run at the same step before either
       // writes back, and both broadcast it — at the resolve step that is two NFTs
-      // for one drop. The guard is the loop's, shared with the timer; what this
-      // pins is that the route goes through it rather than around it.
+      // for one drop. What this pins is that the route goes through `tick()`
+      // rather than reaching past it to `runOnce()`; which of the two guards
+      // inside `tick()` fires is not this file's business, and each is pinned
+      // on its own in lootMinterLoop.test.ts.
       await start();
       await runOwedLoot();
 

@@ -450,3 +450,34 @@ create table if not exists nft_holder_age_cache (
 create index if not exists nft_holder_age_pending_idx
   on nft_holder_age_cache (checked_at)
   where source = 'fallback_pending';
+
+-- Cross-instance mutual exclusion for scheduled jobs (docs/09 B7).
+--
+-- One row per job, held for a lease rather than for a session. The free-run loot
+-- ceremony is the only user: it is driven over HTTP by two schedulers against a
+-- deployment that can have several warm instances, and each instance's in-process
+-- guard knows nothing about the others. Two passes on two instances read the same
+-- run at the same recorded step and both broadcast it; the loser aborts, and if
+-- its txid is the one recorded, a player is owed a drop the chain never minted.
+--
+-- Deliberately NOT `pg_try_advisory_lock`, which is the natural fit and cannot be
+-- used here: advisory locks are session-scoped, and the transaction pooler this
+-- API connects through does not guarantee two statements land on the same backend
+-- (see src/db.ts). Acquire and release are one statement each, which it does.
+--
+-- `lease_until` in the past means the holder is gone — frozen mid-pass, killed,
+-- or replaced by a deploy — and the lease is free. That is the only recovery
+-- mechanism there is, because nothing runs a release in those cases.
+--
+-- This table holds no game state. Truncating it releases every lease, which is
+-- safe when nothing is mid-pass and is a way to reintroduce the race when
+-- something is.
+create table if not exists job_leases (
+  job text primary key,
+  -- Which instance holds it. Diagnostic, and load-bearing on release: a pass that
+  -- overran its lease has already lost it, and an unscoped delete would release
+  -- the new holder's claim on its way out.
+  holder text not null,
+  lease_until timestamptz not null
+);
+

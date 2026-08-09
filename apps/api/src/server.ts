@@ -47,6 +47,11 @@ import {
   PostgresPlayerStatsStore,
   type PlayerStatsStore,
 } from './repos/playerStats.js';
+import {
+  MemoryJobLeaseStore,
+  PostgresJobLeaseStore,
+  type JobLeaseStore,
+} from './repos/jobLeases.js';
 import { MemoryRunStore, PostgresRunStore, type RunStore } from './repos/runs.js';
 import { MemorySpawnStore, PostgresSpawnStore, type SpawnStore } from './repos/spawns.js';
 import { Indexer } from './indexer/indexer.js';
@@ -85,6 +90,14 @@ export interface ServerDeps {
   readonly holderAgeRepo?: HolderAgeRepo;
   readonly spawnStore?: SpawnStore;
   readonly runStore?: RunStore;
+  /**
+   * Cross-instance guard for the loot ceremony (docs/09 B7).
+   *
+   * Injectable so a test can share one store between two loop objects and stand
+   * in for two warm instances — which is the only way to exercise the guard that
+   * matters in production, since `LootMinterLoop`'s own flag covers one process.
+   */
+  readonly jobLeaseStore?: JobLeaseStore;
   readonly forgeHistoryStore?: ForgeHistoryStore;
   readonly playerStatsStore?: PlayerStatsStore;
   /**
@@ -207,6 +220,12 @@ export async function buildServer(deps: ServerDeps = {}): Promise<FastifyInstanc
     deps.spawnStore ?? (config.databaseUrl ? new PostgresSpawnStore() : new MemorySpawnStore());
   const runStore =
     deps.runStore ?? (config.databaseUrl ? new PostgresRunStore() : new MemoryRunStore());
+  // Postgres is what makes this a *cross-instance* guard; the memory store is a
+  // single-process stand-in that keeps one code path instead of two, so the lease
+  // is exercised by the whole test suite rather than first executing on mainnet.
+  const jobLeaseStore =
+    deps.jobLeaseStore ??
+    (config.databaseUrl ? new PostgresJobLeaseStore() : new MemoryJobLeaseStore());
   const forgeHistoryStore =
     deps.forgeHistoryStore ??
     (config.databaseUrl ? new PostgresForgeHistoryStore() : new MemoryForgeHistoryStore());
@@ -497,6 +516,12 @@ export async function buildServer(deps: ServerDeps = {}): Promise<FastifyInstanc
   // twice. Both go through this same loop object so they share its in-flight
   // guard: an operator with both on gets a skipped pass, not two ceremonies
   // broadcasting the same step.
+  //
+  // That guard is per process, and the deployment this runs on has two schedulers
+  // pointed at a fleet of them (docs/08-deployment.md §4.5), so the loop also gets
+  // the shared lease. Without it two instances read the same run at the same
+  // recorded step and both broadcast it — the loser aborts, and an aborted txid
+  // that gets recorded parks a run as failed after the player saw their drop.
   const cronSecret = deps.cronSecret ?? config.cronSecret ?? null;
   const lootMinterOptions = typeof deps.lootMinter === 'object' ? deps.lootMinter : {};
   const lootMinter =
@@ -513,6 +538,7 @@ export async function buildServer(deps: ServerDeps = {}): Promise<FastifyInstanc
           ),
           lootMinterOptions,
           (message, detail) => app.log.info(detail ?? {}, message),
+          jobLeaseStore,
         )
       : null;
 
