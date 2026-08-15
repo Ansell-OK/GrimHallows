@@ -276,6 +276,17 @@ describe('map & dungeon entry', () => {
     expect(JSON.stringify(body)).not.toMatch(/tier/i);
   });
 
+  it('includes a party id only when entering with a party', async () => {
+    stubFetch(() => json({ dungeonType: 'free', runId: '1', runToken: 't' }));
+    await enterFreeDungeon('abc', CHARACTER, [], 'party-123');
+
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      character: CHARACTER,
+      powerUpTokenIds: [],
+      partyId: 'party-123',
+    });
+  });
+
   it('enters unequipped when no loadout is given', async () => {
     stubFetch(() => json({ dungeonType: 'free', runId: '1', runToken: 't' }));
     await enterFreeDungeon('abc', CHARACTER);

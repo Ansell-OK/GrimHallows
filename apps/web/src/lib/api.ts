@@ -61,7 +61,7 @@ export class BackendValidationError extends Error {
 }
 
 interface RequestOptions {
-  readonly method?: "GET" | "POST";
+  readonly method?: "GET" | "POST" | "PATCH";
   readonly body?: unknown;
   /** Send the stored session token, if there is one. Default true. */
   readonly authenticated?: boolean;
@@ -440,11 +440,12 @@ export function enterFreeDungeon(
   spawnId: string,
   character: CharacterRef,
   powerUpTokenIds: readonly string[] = [],
+  partyId?: string | null,
   signal?: AbortSignal,
 ): Promise<FreeEntryResponse> {
   return request(`/dungeons/${encodeURIComponent(spawnId)}/enter`, {
     method: "POST",
-    body: { character, powerUpTokenIds },
+    body: { character, powerUpTokenIds, ...(partyId ? { partyId } : {}) },
     signal,
   });
 }

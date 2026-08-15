@@ -294,7 +294,7 @@ export default function Party() {
                   Validate Entry
                 </Button>
               ) : null}
-              {entryPrepared ? <p className="mb-3 text-xs font-ui text-rot">Party snapshot validated. Free party combat integration is next; no run or payment has been created.</p> : null}
+              {entryPrepared ? <p className="mb-3 text-xs font-ui text-rot">Party snapshot validated. Choose a free dungeon on the map to enter with this party.</p> : null}
               <Button
                 className="w-full"
                 size="sm"
@@ -305,8 +305,7 @@ export default function Party() {
                 {leader ? "Disband Party" : "Leave Party"}
               </Button>
               <p className="mt-5 text-xs font-ui leading-relaxed text-gray-500">
-                Party dungeon entry is not enabled yet. Nothing on this screen
-                charges your wallet.
+                Free party entry is available from the map. Paid party entry remains disabled.
               </p>
             </aside>
           </div>

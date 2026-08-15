@@ -43,6 +43,7 @@ import {
   claimPaidRun,
   enterFreeDungeon,
   enterPaidDungeon,
+  getCurrentParty,
   errorMessage,
   explorerTxLink,
   getConfig,
@@ -145,6 +146,8 @@ export default function Map() {
   const [now, setNow] = useState(() => Date.now());
   const [entering, setEntering] = useState(false);
   const [enterError, setEnterError] = useState<string | null>(null);
+  const [partyId, setPartyId] = useState<string | null>(null);
+  const [partySize, setPartySize] = useState(0);
 
   // The loadout. `equipped` is token ids only — see the header. It survives the
   // popup closing on the paid path, because the selection is made before the
@@ -244,6 +247,13 @@ export default function Map() {
     return () => controller.abort();
   }, [loadPowerUps]);
 
+  useEffect(() => {
+    if (!address) { setPartyId(null); setPartySize(0); return; }
+    getCurrentParty()
+      .then(({ party }) => { setPartyId(party?.id ?? null); setPartySize(party?.members.length ?? 0); })
+      .catch(() => { setPartyId(null); setPartySize(0); });
+  }, [address]);
+
   const toggleEquipped = (tokenId: string) => {
     setEquipped((current) =>
       current.includes(tokenId)
@@ -306,10 +316,11 @@ export default function Map() {
       return;
     }
 
+    if (partyId && partySize < 4 && !window.confirm(`Enter with ${partySize} of 4 party members?`)) return;
     setEntering(true);
     setEnterError(null);
     try {
-      const run = await enterFreeDungeon(spawn.id, character, equipped);
+      const run = await enterFreeDungeon(spawn.id, character, equipped, partyId);
       saveActiveRun({
         runId: run.runId,
         dungeonType: run.dungeonType,
