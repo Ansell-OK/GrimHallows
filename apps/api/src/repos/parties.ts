@@ -24,12 +24,22 @@ export type CreatePartyResult =
   | { readonly kind: 'created'; readonly party: PartyRecord }
   | { readonly kind: 'already_member'; readonly party: PartyRecord };
 export type LeavePartyResult = 'left' | 'disbanded' | 'not_member';
+export type InviteStatus = 'pending' | 'accepted' | 'declined' | 'expired';
+export interface PartyInvite { readonly id: string; readonly partyId: string; readonly inviterAddress: string; readonly inviteeAddress: string; readonly status: InviteStatus; readonly createdAt: Date; readonly expiresAt: Date; readonly respondedAt: Date | null; }
+export type CreateInviteResult = { readonly kind: 'created' | 'existing'; readonly invite: PartyInvite } | { readonly kind: 'not_leader' | 'already_member' | 'self' | 'party_full' };
+export type RespondInviteResult = 'accepted' | 'declined' | 'not_found' | 'expired' | 'party_full' | 'already_member';
 
 export interface PartyStore {
   create(address: string): Promise<CreatePartyResult>;
   current(address: string): Promise<PartyRecord | null>;
   leave(partyId: string, address: string): Promise<LeavePartyResult>;
+  invite(partyId: string, inviter: string, invitee: string): Promise<CreateInviteResult>;
+  pendingInvites(address: string): Promise<PartyInvite[]>;
+  respondToInvite(inviteId: string, address: string, accept: boolean): Promise<RespondInviteResult>;
 }
+
+interface InviteRow { id: string; party_id: string; inviter_address: string; invitee_address: string; status: InviteStatus; created_at: Date; expires_at: Date; responded_at: Date | null; }
+const fromInviteRow = (row: InviteRow): PartyInvite => ({ id: row.id, partyId: row.party_id, inviterAddress: row.inviter_address, inviteeAddress: row.invitee_address, status: row.status, createdAt: row.created_at, expiresAt: row.expires_at, respondedAt: row.responded_at });
 
 interface PartyRow {
   id: string;
@@ -130,10 +140,83 @@ export class PostgresPartyStore implements PartyStore {
       end as outcome`, [partyId, address]);
     return rows[0]?.outcome ?? 'not_member';
   }
+
+  async invite(partyId: string, inviter: string, invitee: string): Promise<CreateInviteResult> {
+    if (inviter === invitee) return { kind: 'self' };
+    const id = randomUUID();
+    const { rows } = await query<(InviteRow & { outcome: string })>(`
+      with locked as materialized (
+        select pg_advisory_xact_lock(hashtextextended($1, 0))
+      ), facts as (
+        select
+          exists(select 1 from party_members cross join locked where party_id=$1 and address=$2 and role='leader') as leader,
+          exists(select 1 from party_members where address=$3) as member,
+          (select count(*) from party_members where party_id=$1) as size
+      ), inserted as (
+        insert into party_invites (id, party_id, inviter_address, invitee_address, expires_at)
+        select $4, $1, $2, $3, now() + interval '7 days' from facts
+        where leader and not member and size < 4
+        on conflict (party_id, invitee_address) where status='pending' do nothing
+        returning *
+      ), chosen as (
+        select *, 'created'::text as outcome from inserted
+        union all
+        select pi.*, 'existing'::text from party_invites pi, facts
+        where pi.party_id=$1 and pi.invitee_address=$3 and pi.status='pending'
+          and facts.leader and not facts.member and facts.size < 4
+          and not exists(select 1 from inserted)
+      ) select * from chosen`, [partyId, inviter, invitee, id]);
+    if (rows[0]) return { kind: rows[0].outcome as 'created' | 'existing', invite: fromInviteRow(rows[0]) };
+    const current = await this.current(inviter);
+    if (!current || current.id !== partyId || current.members[0] === undefined || !current.members.some((m) => m.address === inviter && m.role === 'leader')) return { kind: 'not_leader' };
+    if (await this.current(invitee)) return { kind: 'already_member' };
+    return { kind: 'party_full' };
+  }
+
+  async pendingInvites(address: string): Promise<PartyInvite[]> {
+    const { rows } = await query<InviteRow>(`update party_invites set status='expired' where invitee_address=$1 and status='pending' and expires_at <= now() returning *`, [address]);
+    void rows;
+    const result = await query<InviteRow>(`select * from party_invites where invitee_address=$1 and status='pending' order by created_at desc`, [address]);
+    return result.rows.map(fromInviteRow);
+  }
+
+  async respondToInvite(inviteId: string, address: string, accept: boolean): Promise<RespondInviteResult> {
+    const { rows } = await query<{ outcome: RespondInviteResult }>(`
+      with target as materialized (
+        select * from party_invites where id=$1 and invitee_address=$2 and status='pending'
+      ), locked as materialized (
+        select pg_advisory_xact_lock(hashtextextended(coalesce((select party_id::text from target), $1), 0)),
+               pg_advisory_xact_lock(hashtextextended($2, 0))
+      ), facts as (
+        select t.*, exists(select 1 from party_members cross join locked where address=$2) as member,
+               (select count(*) from party_members where party_id=t.party_id) as size
+        from target t
+      ), joined as (
+        insert into party_members (party_id,address,role)
+        select party_id,$2,'member' from facts where $3 and expires_at > now() and not member and size < 4
+        returning party_id
+      ), updated as (
+        update party_invites pi set status=case when $3 then 'accepted' else 'declined' end,
+          responded_at=now()
+        from facts f where pi.id=f.id and f.expires_at > now()
+          and (not $3 or exists(select 1 from joined)) returning pi.id
+      ) select case
+        when not exists(select 1 from target) then 'not_found'
+        when (select expires_at <= now() from facts) then 'expired'
+        when $3 and (select member from facts) then 'already_member'
+        when $3 and (select size >= 4 from facts) then 'party_full'
+        when $3 and exists(select 1 from updated) then 'accepted'
+        when not $3 and exists(select 1 from updated) then 'declined'
+        else 'not_found' end as outcome`, [inviteId, address, accept]);
+    const outcome = rows[0]?.outcome ?? 'not_found';
+    if (outcome === 'expired') await query(`update party_invites set status='expired', responded_at=now() where id=$1 and status='pending'`, [inviteId]);
+    return outcome;
+  }
 }
 
 export class MemoryPartyStore implements PartyStore {
   private readonly parties = new Map<string, PartyRecord>();
+  private readonly invites = new Map<string, PartyInvite>();
 
   async create(address: string): Promise<CreatePartyResult> {
     const existing = await this.current(address);
@@ -161,5 +244,40 @@ export class MemoryPartyStore implements PartyStore {
     if (member.role === 'leader') { this.parties.delete(partyId); return 'disbanded'; }
     this.parties.set(partyId, { ...party, members: party.members.filter((candidate) => candidate.address !== address) });
     return 'left';
+  }
+
+  async invite(partyId: string, inviter: string, invitee: string): Promise<CreateInviteResult> {
+    if (inviter === invitee) return { kind: 'self' };
+    const party = this.parties.get(partyId);
+    if (!party?.members.some((member) => member.address === inviter && member.role === 'leader')) return { kind: 'not_leader' };
+    if (await this.current(invitee)) return { kind: 'already_member' };
+    if (party.members.length >= 4) return { kind: 'party_full' };
+    const existing = [...this.invites.values()].find((row) => row.partyId === partyId && row.inviteeAddress === invitee && row.status === 'pending');
+    if (existing) return { kind: 'existing', invite: existing };
+    const now = new Date();
+    const invite: PartyInvite = { id: randomUUID(), partyId, inviterAddress: inviter, inviteeAddress: invitee, status: 'pending', createdAt: now, expiresAt: new Date(now.getTime() + 7 * 86400_000), respondedAt: null };
+    this.invites.set(invite.id, invite);
+    return { kind: 'created', invite };
+  }
+
+  async pendingInvites(address: string): Promise<PartyInvite[]> {
+    const now = Date.now();
+    for (const [id, invite] of this.invites) if (invite.status === 'pending' && invite.expiresAt.getTime() <= now) this.invites.set(id, { ...invite, status: 'expired' });
+    return [...this.invites.values()].filter((invite) => invite.inviteeAddress === address && invite.status === 'pending').sort((a,b) => b.createdAt.getTime() - a.createdAt.getTime());
+  }
+
+  async respondToInvite(inviteId: string, address: string, accept: boolean): Promise<RespondInviteResult> {
+    const invite = this.invites.get(inviteId);
+    if (!invite || invite.inviteeAddress !== address || invite.status !== 'pending') return 'not_found';
+    if (invite.expiresAt.getTime() <= Date.now()) { this.invites.set(inviteId, { ...invite, status: 'expired', respondedAt: new Date() }); return 'expired'; }
+    if (accept) {
+      if (await this.current(address)) return 'already_member';
+      const party = this.parties.get(invite.partyId);
+      if (!party) return 'not_found';
+      if (party.members.length >= 4) return 'party_full';
+      this.parties.set(party.id, { ...party, members: [...party.members, { address, role: 'member', ready: false, nftContractId: null, nftTokenId: null, joinedAt: new Date() }] });
+    }
+    this.invites.set(inviteId, { ...invite, status: accept ? 'accepted' : 'declined', respondedAt: new Date() });
+    return accept ? 'accepted' : 'declined';
   }
 }

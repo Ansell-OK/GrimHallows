@@ -441,7 +441,7 @@ export async function buildServer(deps: ServerDeps = {}): Promise<FastifyInstanc
   await registerLeaderboardRoutes(app, { playerStats: playerStatsStore, identity });
   await registerProfileRoutes(app, { chain, playerStats: playerStatsStore, jwtSecret, identity });
   await registerNotificationRoutes(app, { notifications: notificationStore, jwtSecret });
-  await registerPartyRoutes(app, { parties: partyStore, jwtSecret });
+  await registerPartyRoutes(app, { parties: partyStore, notifications: notificationStore, jwtSecret });
 
   await registerDungeonRoutes(app, {
     spawns: spawnStore,

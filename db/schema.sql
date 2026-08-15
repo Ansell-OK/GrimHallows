@@ -79,6 +79,24 @@ create unique index if not exists party_members_address_idx on party_members (ad
 create unique index if not exists party_members_one_leader_idx
   on party_members (party_id) where role = 'leader';
 
+create table if not exists party_invites (
+  id uuid primary key default gen_random_uuid(),
+  party_id uuid not null references parties(id) on delete cascade,
+  inviter_address text not null,
+  invitee_address text not null,
+  status text not null default 'pending'
+    check (status in ('pending','accepted','declined','expired')),
+  created_at timestamptz not null default now(),
+  expires_at timestamptz not null,
+  responded_at timestamptz,
+  check (inviter_address <> invitee_address)
+);
+
+create unique index if not exists party_invites_pending_idx
+  on party_invites (party_id, invitee_address) where status = 'pending';
+create index if not exists party_invites_invitee_idx
+  on party_invites (invitee_address, status, created_at desc);
+
 -- Free dungeon spawns on the world map (off-chain content, no gate fee).
 create table if not exists dungeon_spawns (
   id uuid primary key default gen_random_uuid(),
