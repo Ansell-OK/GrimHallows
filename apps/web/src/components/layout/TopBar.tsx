@@ -1,19 +1,27 @@
 import React from 'react';
-import { Mail, Bell, Settings } from 'lucide-react';
+import { Mail, Bell, Settings, CircleUserRound } from 'lucide-react';
 import { motion } from 'motion/react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { cn } from '@/lib/utils';
 import { useWallet } from '@/lib/wallet';
-import imgProfileArcanist from '@/assets/images/profile_arcanist_1785809282488.jpg';
+import { getProfile, type ProfileResponse } from '@/lib/api';
 
 export function TopBar() {
   const navigate = useNavigate();
   const location = useLocation();
   const { address } = useWallet();
+  const [profile, setProfile] = React.useState<ProfileResponse | null>(null);
+
+  React.useEffect(() => {
+    if (!address) { setProfile(null); return; }
+    const controller = new AbortController();
+    getProfile(controller.signal).then(setProfile).catch(() => undefined);
+    return () => controller.abort();
+  }, [address]);
 
   // Rank is a Phase 7 (leaderboard) value; until then show the identity we
   // actually know rather than a made-up one.
-  const identity = address ? `${address.slice(0, 5)}…${address.slice(-4)}` : 'Not connected';
+  const identity = profile?.identity.displayName ?? (address ? `${address.slice(0, 5)}…${address.slice(-4)}` : 'Not connected');
 
   const navItems = [
     { label: 'Map', path: '/map' },
@@ -35,13 +43,13 @@ export function TopBar() {
           className="flex items-center space-x-3 cursor-pointer group"
           onClick={() => navigate('/profile')}
         >
-          <div className="w-10 h-10 rounded-full border-2 border-stone group-hover:border-void transition-colors bg-obsidian overflow-hidden">
-            <img src={imgProfileArcanist} className="w-full h-full object-cover" alt="Profile" />
+          <div className="w-10 h-10 rounded-full border-2 border-stone group-hover:border-void transition-colors bg-obsidian flex items-center justify-center">
+            <CircleUserRound size={24} strokeWidth={1.25} className="text-gray-500" aria-hidden="true" />
           </div>
           <div>
             <div className="text-sm font-semibold text-gray-200 group-hover:text-white font-mono">{identity}</div>
             <div className="text-[10px] text-gray-500 uppercase tracking-widest">
-              {address ? 'Connected' : 'Wallet'}
+              {address ? `${address.slice(0, 5)}…${address.slice(-4)}` : 'Wallet'}
             </div>
           </div>
         </div>

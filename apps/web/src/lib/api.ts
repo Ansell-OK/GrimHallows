@@ -162,6 +162,23 @@ export function getCharacters(
   return request(`/characters?address=${encodeURIComponent(address)}`, { signal });
 }
 
+export interface ProfileResponse {
+  readonly address: string;
+  readonly identity: { readonly address: string; readonly displayName: string; readonly bnsName: string | null };
+  readonly balanceUstx: string | null;
+  readonly rank: number | null;
+  readonly score: number;
+  readonly dungeonsCompleted: number;
+  readonly freeDungeonsCompleted: number;
+  readonly paidDungeonsCompleted: number;
+  readonly jackpotsWon: number;
+  readonly highestForgeTier: number;
+}
+
+export function getProfile(signal?: AbortSignal): Promise<ProfileResponse> {
+  return request('/profile', { signal });
+}
+
 // ---------------------------------------------------------------------------
 // Power-ups — 04-backend-api-spec.md#2
 // ---------------------------------------------------------------------------
@@ -169,18 +186,24 @@ export function getCharacters(
 /**
  * A held power-up, with its bonus already resolved against one character.
  *
- * `tier` is read from chain (`get-token-tier`), and every number below is
- * derived from it by the shared bonus table. `metadataUri` is flavour and is
- * reported *only* as flavour — 01-game-design.md#6 requires that rewriting a
- * JSON file cannot change what an item does, so this UI must never read a stat
- * out of it. If a name or image is wanted later it comes from there; a die
- * never does.
+ * Both halves come from chain: `tier` from `get-token-tier`, `archetype` parsed
+ * out of the URI STRING that `get-token-uri` returns. Every number below is
+ * `archetypeBonusVector(archetype, tier)` from the shared table.
+ *
+ * `metadataUri` IS READ — for the archetype, and for nothing else. The rule in
+ * 01-game-design.md#6 is that rewriting a JSON file cannot change what an item
+ * does, and that still holds exactly: the archetype is parsed from the *uri
+ * string the contract stores*, which is written once inside `mint` and has no
+ * setter, and the document that string points at is never fetched. So the art
+ * and the name a wallet shows can be re-pinned freely; the dice cannot move.
  */
 export interface EquippablePowerUp extends PowerUpNft {
   readonly tierName: string;
   /** e.g. "Damage dice +1 size, +2 damage, +1 Defense". */
   readonly summary: string;
   readonly defenseBonus: number;
+  /** Added to both max HP and starting HP. Zero for every `relic`. */
+  readonly maxHpBonus: number;
 }
 
 export interface PowerUpsResponse {
