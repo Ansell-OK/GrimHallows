@@ -4,18 +4,20 @@ import { badRequest, conflict, forbidden, notFound } from '../lib/errors.js';
 import type { PartyStore } from '../repos/parties.js';
 import type { CharacterService } from '../services/characterService.js';
 import type { NotificationStore } from '../repos/notifications.js';
+import type { IdentityService } from '../services/identityService.js';
 
-export async function registerPartyRoutes(app: FastifyInstance, deps: { parties: PartyStore; notifications: NotificationStore; characters: CharacterService; jwtSecret: string }) {
+export async function registerPartyRoutes(app: FastifyInstance, deps: { parties: PartyStore; notifications: NotificationStore; characters: CharacterService; identity: IdentityService; jwtSecret: string }) {
+  const withIdentity = async <T extends { members: readonly { address: string }[] }>(party: T | null) => party ? { ...party, members: await Promise.all(party.members.map(async (member) => ({ ...member, identity: await deps.identity.resolve(member.address) }))) } : null;
   app.post('/parties', async (request, reply) => {
     const { sub } = requireSession(request, deps.jwtSecret);
     const result = await deps.parties.create(sub);
     if (result.kind === 'already_member') throw conflict('PARTY_ALREADY_MEMBER', 'Leave your current party before creating another.');
-    return reply.status(201).send({ party: result.party });
+    return reply.status(201).send({ party: await withIdentity(result.party) });
   });
 
   app.get('/parties/current', async (request) => {
     const { sub } = requireSession(request, deps.jwtSecret);
-    return { party: await deps.parties.current(sub) };
+    return { party: await withIdentity(await deps.parties.current(sub)) };
   });
 
   app.post('/parties/:id/leave', async (request) => {

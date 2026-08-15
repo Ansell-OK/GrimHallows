@@ -180,7 +180,7 @@ export default function Party() {
                   >
                     <div className="flex justify-between gap-3">
                       <span className="font-ui text-sm text-gray-200">
-                        {shortAddress(member.address)}
+                        {member.identity.displayName}
                       </span>
                       <span
                         className={

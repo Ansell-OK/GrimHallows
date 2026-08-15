@@ -215,6 +215,7 @@ export function getNotifications(
 
 export interface PartyMemberRecord {
   readonly address: string;
+  readonly identity: { readonly address: string; readonly displayName: string; readonly bnsName: string | null };
   readonly role: "leader" | "member";
   readonly ready: boolean;
   readonly nftContractId: string | null;

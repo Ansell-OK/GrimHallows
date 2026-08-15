@@ -5,6 +5,7 @@ import { MemoryPartyStore } from '../src/repos/parties.js';
 import { registerPartyRoutes } from '../src/routes/parties.js';
 import { MemoryNotificationStore } from '../src/repos/notifications.js';
 import type { CharacterService } from '../src/services/characterService.js';
+import type { IdentityService } from '../src/services/identityService.js';
 
 const SECRET = 'party-test-secret-at-least-32-bytes';
 const ALICE = 'ST1SJ3DTE5DN7X54YDH5D64R3BCB6A2AG2ZQ8YPD5';
@@ -21,7 +22,8 @@ describe('party routes', () => {
     store = new MemoryPartyStore();
     notifications = new MemoryNotificationStore();
     const characters = { listForAddress: async (address: string) => address === ALICE ? [{ contractId: 'SPTEST.character', tokenId: '7' }] : [] } as unknown as CharacterService;
-    await registerPartyRoutes(app, { parties: store, notifications, characters, jwtSecret: SECRET });
+    const identity = { resolve: async (address: string) => ({ address, displayName: address === ALICE ? 'alice.btc' : 'bob.btc', bnsName: address === ALICE ? 'alice.btc' : 'bob.btc' }) } as unknown as IdentityService;
+    await registerPartyRoutes(app, { parties: store, notifications, characters, identity, jwtSecret: SECRET });
   });
   afterEach(async () => app.close());
 
@@ -33,7 +35,7 @@ describe('party routes', () => {
   it('creates a party with the creator as its unready leader', async () => {
     const response = await app.inject({ method: 'POST', url: '/parties', headers: auth(ALICE) });
     expect(response.statusCode).toBe(201);
-    expect(response.json().party).toMatchObject({ createdBy: ALICE, members: [{ address: ALICE, role: 'leader', ready: false }] });
+    expect(response.json().party).toMatchObject({ createdBy: ALICE, members: [{ address: ALICE, role: 'leader', ready: false, identity: { displayName: 'alice.btc' } }] });
     expect(response.json().party.inviteCode).toHaveLength(12);
   });
 
