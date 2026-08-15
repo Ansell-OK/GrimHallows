@@ -145,6 +145,7 @@ export interface MintBlock {
 }
 
 export interface ChainClient {
+  getPrimaryName?(address: string): Promise<string | null>;
   /** Spendable STX balance in microSTX, as a decimal string. */
   getStxBalance?(address: string): Promise<string>;
   getNftHoldings(address: string): Promise<NftHolding[]>;
@@ -412,6 +413,12 @@ export class HiroChainClient implements ChainClient {
       throw upstreamUnavailable('Stacks API returned an invalid STX balance');
     }
     return balance;
+  }
+
+  async getPrimaryName(address: string): Promise<string | null> {
+    const body = await this.fetchJson<{ names?: unknown }>(`/v1/addresses/stacks/${encodeURIComponent(address)}`);
+    const names = Array.isArray(body.names) ? body.names.filter((name): name is string => typeof name === 'string') : [];
+    return names[0] ?? null;
   }
 
   async getNftHoldings(address: string): Promise<NftHolding[]> {

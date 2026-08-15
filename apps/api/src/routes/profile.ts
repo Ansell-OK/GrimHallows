@@ -3,11 +3,13 @@ import type { FastifyInstance } from 'fastify';
 import { requireSession } from '../lib/authGuard.js';
 import type { ChainClient } from '../lib/hiro.js';
 import type { PlayerStatsStore } from '../repos/playerStats.js';
+import type { IdentityService } from '../services/identityService.js';
 
 export interface ProfileRouteDeps {
   readonly chain: ChainClient;
   readonly playerStats: PlayerStatsStore;
   readonly jwtSecret: string;
+  readonly identity?: IdentityService;
 }
 
 export async function registerProfileRoutes(
@@ -25,9 +27,11 @@ export async function registerProfileRoutes(
     const balanceUstx = deps.chain.getStxBalance
       ? await deps.chain.getStxBalance(address)
       : null;
+    const identity = deps.identity ? await deps.identity.resolve(address) : { address, displayName: `${address.slice(0, 6)}...${address.slice(-4)}`, bnsName: null };
 
     return {
       address,
+      identity,
       balanceUstx,
       rank: index >= 0 ? index + 1 : null,
       score: row?.score ?? 0,

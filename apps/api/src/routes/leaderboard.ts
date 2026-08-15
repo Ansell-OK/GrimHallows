@@ -49,10 +49,12 @@ import {
 import type { FastifyInstance } from 'fastify';
 import { badRequest } from '../lib/errors.js';
 import type { PlayerStatsStore } from '../repos/playerStats.js';
+import type { IdentityService } from '../services/identityService.js';
 
 export interface LeaderboardRouteDeps {
   readonly playerStats: PlayerStatsStore;
   readonly now?: () => Date;
+  readonly identity?: IdentityService;
 }
 
 /** Rows returned. Deep enough to find yourself on; short enough to stay one page. */
@@ -111,8 +113,12 @@ export async function registerLeaderboardRoutes(
       SOURCES_PER_ENTRY,
     );
 
-    const entries: LeaderboardEntry[] = ranked.map((row) => ({
+    const identities = deps.identity
+      ? await Promise.all(ranked.map((row) => deps.identity!.resolve(row.address)))
+      : ranked.map((row) => ({ address: row.address, displayName: `${row.address.slice(0, 6)}...${row.address.slice(-4)}`, bnsName: null }));
+    const entries: LeaderboardEntry[] = ranked.map((row, index) => ({
       address: row.address,
+      identity: identities[index],
       dungeonsCompleted: dungeonsCompleted(row),
       freeDungeonsCompleted: row.freeDungeonsCompleted,
       paidDungeonsCompleted: row.paidDungeonsCompleted,

@@ -9,7 +9,7 @@
 // `encounter.ts` imports the other direction. The alternative was restating the
 // engine's input types here, and two definitions of "what a fight was built
 // from" is exactly the drift the verification story can't afford.
-import type { EncounterSetup, PlayerAction } from './encounter.js';
+import type { PlayerAction, StoredEncounterSetup } from './encounter.js';
 
 // ---------------------------------------------------------------------------
 // Characters & stats
@@ -146,11 +146,14 @@ export interface HolderAge {
 /**
  * What a power does when you spend a turn on it.
  *
- * Only two kinds exist for MVP, which is deliberate: the starter kit is
- * Attack / Guard / one class special (06-mvp-roadmap.md Phase 4), and a special
- * is still an attack — it just rolls different dice on a cooldown.
+ * The starter kit is Attack / Guard / one class special (06-mvp-roadmap.md
+ * Phase 4), and a special is still an attack — it just rolls different dice on a
+ * cooldown. `heal` is the one kind no class kit contains: it arrives only from
+ * an equipped `elixir`, which is why it is a `PowerKind` rather than a class
+ * feature. It rolls dice like an attack and needs no target like a Guard, so it
+ * is neither of the other two.
  */
-export type PowerKind = 'attack' | 'guard';
+export type PowerKind = 'attack' | 'guard' | 'heal';
 
 /**
  * `cost` is deliberately present but unused for MVP — keeps the deferred
@@ -166,11 +169,30 @@ export interface Power {
    * Damage dice, e.g. `2d6`. Null for a power that rolls nothing at all — a
    * Guard has no damage roll, and giving it a formula like `0d0` would put a
    * meaningless die in the turn log and in front of the dice animation.
+   *
+   * On a `heal` this is the healing roll, and it is the one formula equipped
+   * items must never touch: see `powerAsRolled` in `encounter.ts`.
    */
   readonly diceFormula: string | null;
   readonly cost: number | null;
   /** Turns before the power can be used again. 0 = every turn. */
   readonly cooldown: number;
+  /**
+   * Uses per encounter, or null for a power that never runs out.
+   *
+   * Null on everything a class brings in: a kit power is a capability, and one
+   * that expired mid-dungeon would leave a combatant with nothing to do. A
+   * granted power can be a *consumable* — a flask has a number of swallows in
+   * it — so this is the axis that makes an elixir a resource rather than a
+   * permanent upgrade.
+   *
+   * Charges are per encounter and reset between runs. They are never persisted:
+   * `runEncounter` is a replay from `(seed, setup, actions)`, so uses remaining
+   * are recomputed from the action list every time rather than stored anywhere
+   * that could drift from it. This is also why a potion is not burned on use —
+   * a chain transaction confirming mid-fight cannot live inside a pure replay.
+   */
+  readonly charges: number | null;
   /** Which stat modifier applies to this power's attack/damage roll. */
   readonly stat: StatKey;
   /** Added to the user's Defense DC until their next turn. 0 for attacks. */
@@ -181,6 +203,17 @@ export interface PowerUpNft {
   readonly contractId: string;
   readonly tokenId: string;
   readonly tier: number;
+  /**
+   * The archetype slug, parsed from `metadataUri` — never fetched from it.
+   *
+   * Always a registered slug: a uri this build does not recognize resolves to
+   * `relic`, which is what every token minted before archetypes existed reads
+   * as. So this field is total, and a client can key art and copy off it without
+   * a fallback branch of its own.
+   */
+  readonly archetype: string;
+  /** Display name: `Legendary Chestplate #17`. Derived, never stored. */
+  readonly name: string;
   readonly grantedPowerId: string | null;
   /** e.g. `attack:1d6->1d8` */
   readonly diceFormulaBonus: string | null;
@@ -486,6 +519,17 @@ export interface TurnRolls {
   readonly damageDice?: readonly number[];
   readonly targetDc?: number;
   readonly hit?: boolean;
+  /**
+   * HP restored, and the faces that produced it. Present only on a `heal` turn.
+   *
+   * Separate from `damageRoll`/`damageDice` even though a heal rolls from the
+   * same derivation slots, because the two mean opposite things to a reader: a
+   * client that rendered healing as `damageDealt` would show a potion hurting
+   * its drinker. The value here is the roll, not the HP actually gained — a heal
+   * clamps at `maxHp`, and `targetHpAfter` is where the applied result lives.
+   */
+  readonly healRoll?: number;
+  readonly healDice?: readonly number[];
 }
 
 /** What a combatant spent their turn doing. Mirrors `Power.kind`. */
@@ -539,6 +583,14 @@ export interface CombatantView {
   readonly powers: readonly Power[];
   /** Power id → turns remaining before it can be used again. */
   readonly cooldowns: Readonly<Record<string, number>>;
+  /**
+   * Power id → uses left this encounter. Only powers with a charge limit appear.
+   *
+   * A power absent from this map is unlimited, which is every class power; the
+   * map is not "charges for all powers, mostly Infinity". Reset each encounter
+   * and never persisted — see `Power.charges`.
+   */
+  readonly charges: Readonly<Record<string, number>>;
 }
 
 /** The whole encounter as the client sees it. Derived, never authored. */
@@ -610,7 +662,12 @@ export interface VerificationData {
    */
   readonly committedAt: string | null;
   readonly resolvedAt: string | null;
-  /** The transcript fingerprint inside the resolve statement. Null until resolved. */
+  /**
+   * The transcript fingerprint inside the resolve statement. Null until resolved.
+   *
+   * Taken over `setup` below exactly as published — see that field. Recomputing
+   * it is `sha256` of the key-sorted JSON of `{actions, setup}`.
+   */
   readonly transcriptHash: string | null;
   readonly diceAlgoVersion: string;
   readonly encounterAlgoVersion: string;
@@ -630,8 +687,18 @@ export interface VerificationData {
    * are caught.
    *
    * `setup` is null before commit, when there is no frozen encounter yet.
+   *
+   * WHY THE STORED SHAPE AND NOT THE RUNNABLE ONE. `setup` is the row as it was
+   * written at commit time, byte for byte, because that is what
+   * `transcriptHash` above was taken over — verbatim has to mean verbatim or
+   * the hash beside it is uncheckable. A row committed before archetypes
+   * existed still spells a loadout `powerUpTiers: number[]`, which
+   * `runEncounter` does not accept. Put it through `normalizeStoredSetup` from
+   * this package first: that is the declared conversion, it is what the backend
+   * replays through, and for every run committed since archetypes landed it
+   * changes nothing.
    */
-  readonly setup: EncounterSetup | null;
+  readonly setup: StoredEncounterSetup | null;
   readonly actions: readonly PlayerAction[];
 }
 
@@ -713,6 +780,7 @@ export interface LeaderboardSource {
 
 export interface LeaderboardEntry {
   readonly address: string;
+  readonly identity?: { readonly address: string; readonly displayName: string; readonly bnsName: string | null };
   /** `freeDungeonsCompleted + paidDungeonsCompleted`, published for convenience. */
   readonly dungeonsCompleted: number;
   /**
