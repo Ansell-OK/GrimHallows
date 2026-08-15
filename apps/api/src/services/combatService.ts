@@ -83,6 +83,15 @@ export interface CombatServiceDeps {
 export class CombatService {
   constructor(private readonly deps: CombatServiceDeps) {}
 
+  async buildPartySetup(
+    monsterTableId: string,
+    members: readonly { address: string; character: CharacterRef; displayName?: string }[],
+  ): Promise<EncounterSetup> {
+    if (members.length < 1 || members.length > 4) throw new Error('A party encounter requires one to four members');
+    const party = await Promise.all(members.map((member, index) => this.buildMember(`p${index}`, member.address, member.character, [], member.displayName)));
+    return { monsterTableId, party };
+  }
+
   /**
    * Build the encounter inputs for a run, reading metadata from chain.
    *
@@ -106,6 +115,16 @@ export class CombatService {
     powerUpItems: readonly EquippedItem[],
     displayName?: string,
   ): Promise<EncounterSetup> {
+    return { monsterTableId, party: [await this.buildMember(SOLO_COMBATANT_ID, run.createdBy, character, powerUpItems, displayName)] };
+  }
+
+  private async buildMember(
+    id: string,
+    address: string,
+    character: CharacterRef,
+    powerUpItems: readonly EquippedItem[],
+    displayName?: string,
+  ): Promise<EncounterSetup['party'][number]> {
     const metadata = await this.deps.chain
       .getTokenMetadata(character.contractId, character.tokenId)
       .catch(() => null);
@@ -115,7 +134,7 @@ export class CombatService {
     // character partway through a fight it had already started.
     const age = this.deps.holderAge
       ? await this.deps.holderAge
-          .forToken(run.createdBy, character.contractId, character.tokenId)
+          .forToken(address, character.contractId, character.tokenId)
           .catch(() => UNKNOWN_HOLDER_AGE)
       : UNKNOWN_HOLDER_AGE;
 
@@ -149,17 +168,12 @@ export class CombatService {
     });
 
     return {
-      monsterTableId,
-      party: [
-        {
-          id: SOLO_COMBATANT_ID,
-          address: run.createdBy,
-          name: displayName?.trim() || metadata?.name?.trim() || `Character #${character.tokenId}`,
-          charClass: derived.classId,
-          stats: derived.stats,
-          powerUpItems,
-        },
-      ],
+      id,
+      address,
+      name: displayName?.trim() || metadata?.name?.trim() || `Character #${character.tokenId}`,
+      charClass: derived.classId,
+      stats: derived.stats,
+      powerUpItems,
     };
   }
 
