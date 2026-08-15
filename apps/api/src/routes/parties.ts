@@ -2,9 +2,10 @@ import type { FastifyInstance } from 'fastify';
 import { requireSession } from '../lib/authGuard.js';
 import { badRequest, conflict, forbidden, notFound } from '../lib/errors.js';
 import type { PartyStore } from '../repos/parties.js';
+import type { CharacterService } from '../services/characterService.js';
 import type { NotificationStore } from '../repos/notifications.js';
 
-export async function registerPartyRoutes(app: FastifyInstance, deps: { parties: PartyStore; notifications: NotificationStore; jwtSecret: string }) {
+export async function registerPartyRoutes(app: FastifyInstance, deps: { parties: PartyStore; notifications: NotificationStore; characters: CharacterService; jwtSecret: string }) {
   app.post('/parties', async (request, reply) => {
     const { sub } = requireSession(request, deps.jwtSecret);
     const result = await deps.parties.create(sub);
@@ -80,5 +81,19 @@ export async function registerPartyRoutes(app: FastifyInstance, deps: { parties:
     if (outcome === 'not_member') throw notFound('PARTY_MEMBER_NOT_FOUND', 'Party member not found.');
     await deps.notifications.create(address.trim(), 'party_kicked', { partyId: id, address: sub });
     return { kicked: address.trim() };
+  });
+
+  app.post('/parties/:id/character', async (request) => {
+    const { sub } = requireSession(request, deps.jwtSecret);
+    const { id } = request.params as { id: string };
+    const body = (request.body ?? {}) as { contractId?: unknown; tokenId?: unknown };
+    const contractId = typeof body.contractId === 'string' ? body.contractId.trim() : '';
+    const tokenId = typeof body.tokenId === 'string' || typeof body.tokenId === 'number' ? String(body.tokenId).trim() : '';
+    if (!contractId || !/^\d+$/.test(tokenId)) throw badRequest('INVALID_CHARACTER', 'A character contractId and numeric tokenId are required.');
+    const owned = (await deps.characters.listForAddress(sub)).some((character) => character.contractId === contractId && character.tokenId === tokenId);
+    if (!owned) throw badRequest('CHARACTER_NOT_HELD', 'That character is not held by the authenticated wallet.');
+    const outcome = await deps.parties.setCharacter(id, sub, contractId, tokenId);
+    if (outcome === 'not_member') throw notFound('PARTY_NOT_FOUND', 'Party or member not found.');
+    return { character: { contractId, tokenId }, ready: false };
   });
 }

@@ -39,6 +39,7 @@ export interface PartyStore {
   respondToInvite(inviteId: string, address: string, accept: boolean): Promise<RespondInviteResult>;
   setReady(partyId: string, address: string, ready: boolean): Promise<PartyMutationResult>;
   kick(partyId: string, leader: string, target: string): Promise<PartyMutationResult>;
+  setCharacter(partyId: string, address: string, contractId: string, tokenId: string): Promise<PartyMutationResult>;
 }
 
 interface InviteRow { id: string; party_id: string; inviter_address: string; invitee_address: string; status: InviteStatus; created_at: Date; expires_at: Date; responded_at: Date | null; }
@@ -229,6 +230,11 @@ export class PostgresPartyStore implements PartyStore {
       select case when not (select leader from auth) then 'forbidden' when exists(select 1 from deleted) then 'updated' else 'not_member' end as outcome`, [partyId, leader, target]);
     return result.rows[0]?.outcome ?? 'not_member';
   }
+
+  async setCharacter(partyId: string, address: string, contractId: string, tokenId: string): Promise<PartyMutationResult> {
+    const result = await query<{ outcome: PartyMutationResult }>(`update party_members set nft_contract_id=$3, nft_token_id=$4, ready=false where party_id=$1 and address=$2 returning 'updated'::text as outcome`, [partyId, address, contractId, tokenId]);
+    return result.rows[0]?.outcome ?? 'not_member';
+  }
 }
 
 export class MemoryPartyStore implements PartyStore {
@@ -312,6 +318,13 @@ export class MemoryPartyStore implements PartyStore {
     if (!party.members.some((member) => member.address === leader && member.role === 'leader')) return 'forbidden';
     if (!party.members.some((member) => member.address === target)) return 'not_member';
     this.parties.set(partyId, { ...party, members: party.members.filter((member) => member.address !== target) });
+    return 'updated';
+  }
+
+  async setCharacter(partyId: string, address: string, contractId: string, tokenId: string): Promise<PartyMutationResult> {
+    const party = this.parties.get(partyId);
+    if (!party || !party.members.some((member) => member.address === address)) return 'not_member';
+    this.parties.set(partyId, { ...party, members: party.members.map((member) => member.address === address ? { ...member, nftContractId: contractId, nftTokenId: tokenId, ready: false } : member) });
     return 'updated';
   }
 }

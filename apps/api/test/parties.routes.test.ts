@@ -4,6 +4,7 @@ import { issueToken } from '../src/lib/jwt.js';
 import { MemoryPartyStore } from '../src/repos/parties.js';
 import { registerPartyRoutes } from '../src/routes/parties.js';
 import { MemoryNotificationStore } from '../src/repos/notifications.js';
+import type { CharacterService } from '../src/services/characterService.js';
 
 const SECRET = 'party-test-secret-at-least-32-bytes';
 const ALICE = 'ST1SJ3DTE5DN7X54YDH5D64R3BCB6A2AG2ZQ8YPD5';
@@ -19,7 +20,8 @@ describe('party routes', () => {
     app = Fastify();
     store = new MemoryPartyStore();
     notifications = new MemoryNotificationStore();
-    await registerPartyRoutes(app, { parties: store, notifications, jwtSecret: SECRET });
+    const characters = { listForAddress: async (address: string) => address === ALICE ? [{ contractId: 'SPTEST.character', tokenId: '7' }] : [] } as unknown as CharacterService;
+    await registerPartyRoutes(app, { parties: store, notifications, characters, jwtSecret: SECRET });
   });
   afterEach(async () => app.close());
 
@@ -95,5 +97,15 @@ describe('party routes', () => {
     expect((await app.inject({ method: 'POST', url: `/parties/${partyId}/kick`, headers: auth(BOB), payload: { address: ALICE } })).statusCode).toBe(403);
     expect((await app.inject({ method: 'POST', url: `/parties/${partyId}/kick`, headers: auth(ALICE), payload: { address: BOB } })).json()).toEqual({ kicked: BOB });
     expect((await notifications.list(BOB, 10)).some((row) => row.type === 'party_kicked')).toBe(true);
+  });
+
+  it('binds a held character to the member and clears readiness on selection', async () => {
+    const created = await app.inject({ method: 'POST', url: '/parties', headers: auth(ALICE) });
+    const partyId = created.json().party.id;
+    await app.inject({ method: 'POST', url: `/parties/${partyId}/ready`, headers: auth(ALICE), payload: { ready: true } });
+    const selected = await app.inject({ method: 'POST', url: `/parties/${partyId}/character`, headers: auth(ALICE), payload: { contractId: 'SPTEST.character', tokenId: 7 } });
+    expect(selected.json()).toEqual({ character: { contractId: 'SPTEST.character', tokenId: '7' }, ready: false });
+    expect((await store.current(ALICE))?.members[0]).toMatchObject({ nftContractId: 'SPTEST.character', nftTokenId: '7', ready: false });
+    expect((await app.inject({ method: 'POST', url: `/parties/${partyId}/character`, headers: auth(ALICE), payload: { contractId: 'SPTEST.character', tokenId: 8 } })).statusCode).toBe(400);
   });
 });
