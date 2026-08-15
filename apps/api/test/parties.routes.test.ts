@@ -85,4 +85,15 @@ describe('party routes', () => {
     expect(response.json()).toEqual({ outcome: 'declined' });
     expect(await store.current(BOB)).toBeNull();
   });
+
+  it('supports readiness and leader-only removal', async () => {
+    const created = await app.inject({ method: 'POST', url: '/parties', headers: auth(ALICE) });
+    const partyId = created.json().party.id;
+    const invite = await app.inject({ method: 'POST', url: `/parties/${partyId}/invites`, headers: auth(ALICE), payload: { address: BOB } });
+    await app.inject({ method: 'POST', url: `/party-invites/${invite.json().invite.id}/respond`, headers: auth(BOB), payload: { accept: true } });
+    expect((await app.inject({ method: 'POST', url: `/parties/${partyId}/ready`, headers: auth(BOB), payload: { ready: true } })).json()).toEqual({ ready: true });
+    expect((await app.inject({ method: 'POST', url: `/parties/${partyId}/kick`, headers: auth(BOB), payload: { address: ALICE } })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'POST', url: `/parties/${partyId}/kick`, headers: auth(ALICE), payload: { address: BOB } })).json()).toEqual({ kicked: BOB });
+    expect((await notifications.list(BOB, 10)).some((row) => row.type === 'party_kicked')).toBe(true);
+  });
 });

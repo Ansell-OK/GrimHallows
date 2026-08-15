@@ -58,4 +58,27 @@ export async function registerPartyRoutes(app: FastifyInstance, deps: { parties:
     if (invite) await deps.notifications.create(invite.inviterAddress, accept ? 'party_invite_accepted' : 'party_invite_declined', { partyId: invite.partyId, inviteId: invite.id, address: sub });
     return { outcome };
   });
+
+  app.post('/parties/:id/ready', async (request) => {
+    const { sub } = requireSession(request, deps.jwtSecret);
+    const { id } = request.params as { id: string };
+    const ready = (request.body as { ready?: unknown } | null)?.ready;
+    if (typeof ready !== 'boolean') throw badRequest('READY_REQUIRED', 'The ready field must be a boolean.');
+    const outcome = await deps.parties.setReady(id, sub, ready);
+    if (outcome === 'not_member') throw notFound('PARTY_NOT_FOUND', 'Party or member not found.');
+    return { ready };
+  });
+
+  app.post('/parties/:id/kick', async (request) => {
+    const { sub } = requireSession(request, deps.jwtSecret);
+    const { id } = request.params as { id: string };
+    const address = (request.body as { address?: unknown } | null)?.address;
+    if (typeof address !== 'string' || !address.trim()) throw badRequest('MEMBER_REQUIRED', 'A member address is required.');
+    const outcome = await deps.parties.kick(id, sub, address.trim());
+    if (outcome === 'forbidden') throw forbidden('PARTY_LEADER_REQUIRED', 'Only the party leader can remove members.');
+    if (outcome === 'invalid_target') throw badRequest('CANNOT_KICK_SELF', 'The party leader cannot kick themselves.');
+    if (outcome === 'not_member') throw notFound('PARTY_MEMBER_NOT_FOUND', 'Party member not found.');
+    await deps.notifications.create(address.trim(), 'party_kicked', { partyId: id, address: sub });
+    return { kicked: address.trim() };
+  });
 }

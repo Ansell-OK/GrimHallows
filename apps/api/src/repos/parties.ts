@@ -28,6 +28,7 @@ export type InviteStatus = 'pending' | 'accepted' | 'declined' | 'expired';
 export interface PartyInvite { readonly id: string; readonly partyId: string; readonly inviterAddress: string; readonly inviteeAddress: string; readonly status: InviteStatus; readonly createdAt: Date; readonly expiresAt: Date; readonly respondedAt: Date | null; }
 export type CreateInviteResult = { readonly kind: 'created' | 'existing'; readonly invite: PartyInvite } | { readonly kind: 'not_leader' | 'already_member' | 'self' | 'party_full' };
 export type RespondInviteResult = 'accepted' | 'declined' | 'not_found' | 'expired' | 'party_full' | 'already_member';
+export type PartyMutationResult = 'updated' | 'not_member' | 'forbidden' | 'invalid_target';
 
 export interface PartyStore {
   create(address: string): Promise<CreatePartyResult>;
@@ -36,6 +37,8 @@ export interface PartyStore {
   invite(partyId: string, inviter: string, invitee: string): Promise<CreateInviteResult>;
   pendingInvites(address: string): Promise<PartyInvite[]>;
   respondToInvite(inviteId: string, address: string, accept: boolean): Promise<RespondInviteResult>;
+  setReady(partyId: string, address: string, ready: boolean): Promise<PartyMutationResult>;
+  kick(partyId: string, leader: string, target: string): Promise<PartyMutationResult>;
 }
 
 interface InviteRow { id: string; party_id: string; inviter_address: string; invitee_address: string; status: InviteStatus; created_at: Date; expires_at: Date; responded_at: Date | null; }
@@ -212,6 +215,20 @@ export class PostgresPartyStore implements PartyStore {
     if (outcome === 'expired') await query(`update party_invites set status='expired', responded_at=now() where id=$1 and status='pending'`, [inviteId]);
     return outcome;
   }
+
+  async setReady(partyId: string, address: string, ready: boolean): Promise<PartyMutationResult> {
+    const result = await query<{ outcome: PartyMutationResult }>(`update party_members set ready=$3 where party_id=$1 and address=$2 returning 'updated'::text as outcome`, [partyId, address, ready]);
+    return result.rows[0]?.outcome ?? 'not_member';
+  }
+
+  async kick(partyId: string, leader: string, target: string): Promise<PartyMutationResult> {
+    if (leader === target) return 'invalid_target';
+    const result = await query<{ outcome: PartyMutationResult }>(`
+      with auth as (select exists(select 1 from party_members where party_id=$1 and address=$2 and role='leader') as leader),
+      deleted as (delete from party_members where party_id=$1 and address=$3 and (select leader from auth) returning address)
+      select case when not (select leader from auth) then 'forbidden' when exists(select 1 from deleted) then 'updated' else 'not_member' end as outcome`, [partyId, leader, target]);
+    return result.rows[0]?.outcome ?? 'not_member';
+  }
 }
 
 export class MemoryPartyStore implements PartyStore {
@@ -279,5 +296,22 @@ export class MemoryPartyStore implements PartyStore {
     }
     this.invites.set(inviteId, { ...invite, status: accept ? 'accepted' : 'declined', respondedAt: new Date() });
     return accept ? 'accepted' : 'declined';
+  }
+
+  async setReady(partyId: string, address: string, ready: boolean): Promise<PartyMutationResult> {
+    const party = this.parties.get(partyId);
+    if (!party || !party.members.some((member) => member.address === address)) return 'not_member';
+    this.parties.set(partyId, { ...party, members: party.members.map((member) => member.address === address ? { ...member, ready } : member) });
+    return 'updated';
+  }
+
+  async kick(partyId: string, leader: string, target: string): Promise<PartyMutationResult> {
+    if (leader === target) return 'invalid_target';
+    const party = this.parties.get(partyId);
+    if (!party) return 'not_member';
+    if (!party.members.some((member) => member.address === leader && member.role === 'leader')) return 'forbidden';
+    if (!party.members.some((member) => member.address === target)) return 'not_member';
+    this.parties.set(partyId, { ...party, members: party.members.filter((member) => member.address !== target) });
+    return 'updated';
   }
 }
