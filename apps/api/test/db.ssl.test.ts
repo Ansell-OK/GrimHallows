@@ -38,6 +38,14 @@ describe('sslConfig', () => {
     });
   });
 
+  it('requires authenticated TLS for a remote database on Vercel', () => {
+    vi.stubEnv('VERCEL', '1');
+    expect(() => sslConfig(SUPABASE)).toThrow(/DATABASE_SSL_CA/);
+
+    vi.stubEnv('DATABASE_SSL_CA', 'production-ca');
+    expect(sslConfig(SUPABASE)).toEqual({ ca: 'production-ca', rejectUnauthorized: true });
+  });
+
   it('can be forced on for a local host and off for a remote one', () => {
     vi.stubEnv('DATABASE_SSL', 'true');
     expect(sslConfig(LOCAL)).toEqual({ rejectUnauthorized: false });

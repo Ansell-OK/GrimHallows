@@ -51,4 +51,9 @@ describe('parseOriginList', () => {
   it('refuses a value that contains no origins at all', () => {
     expect(() => parseOriginList(' , , ')).toThrow(/no origins/);
   });
+
+  it('rejects non-http schemes and paths', () => {
+    expect(() => parseOriginList('javascript:alert(1)')).toThrow(/bare http/);
+    expect(() => parseOriginList('https://example.com/app')).toThrow(/bare http/);
+  });
 });

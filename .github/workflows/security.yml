@@ -1,0 +1,25 @@
+name: security
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions: {}
+
+jobs:
+  audit-and-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Production dependency audit
+        run: node scripts/audit-policy.mjs
+      - name: Repository secret scan
+        run: node scripts/security-scan.mjs

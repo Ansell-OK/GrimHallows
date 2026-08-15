@@ -67,7 +67,9 @@ function getApp(): Promise<FastifyInstance> {
   // response to say why. Importing here defers the whole module graph into the
   // try/catch below, so a misconfig surfaces as the logged 500 this file already
   // knows how to produce — and the real message lands in the platform's logs.
-  appPromise ??= import('./server.js')
+  appPromise ??= import('./config.js')
+    .then(({ assertHostedApiKeySeparation }) => assertHostedApiKeySeparation())
+    .then(() => import('./server.js'))
     .then(({ buildServer }) => buildServer({ onDemand: true }))
     .then(async (app) => {
       // Fastify will not route until the plugin tree is resolved, and `emit` below

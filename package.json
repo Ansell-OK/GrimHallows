@@ -25,9 +25,15 @@
     "seed": "tsx scripts/seed-contracts.mjs",
     "verify-seed": "tsx scripts/verify-seed.mjs",
     "fund-pool": "tsx scripts/fund-pool.mjs",
-    "set-oracle": "tsx scripts/set-oracle.mjs"
+    "set-oracle": "tsx scripts/set-oracle.mjs",
+    "security:audit": "node scripts/audit-policy.mjs",
+    "security:scan": "node scripts/security-scan.mjs",
+    "loot-metadata": "tsx scripts/generate-loot-metadata.mjs"
   },
   "engines": {
     "node": ">=22"
+  },
+  "devDependencies": {
+    "nanoid": "^3.3.18"
   }
 }

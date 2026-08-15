@@ -45,6 +45,7 @@ describe('POST /admin/fund-pool', () => {
       jwtSecret: JWT_SECRET,
       ownerAddress,
       logger: false,
+      rateLimit: false,
     });
   }
 

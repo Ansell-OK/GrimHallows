@@ -86,9 +86,11 @@ import { registerForgeRoutes } from './routes/forge.js';
 import { registerImageProxyRoutes } from './routes/imageProxy.js';
 import { registerJobRoutes } from './routes/jobs.js';
 import { registerLeaderboardRoutes } from './routes/leaderboard.js';
+import { registerProfileRoutes } from './routes/profile.js';
 import { registerMapRoutes } from './routes/map.js';
 import { registerPaidClaimRoutes } from './routes/paidDungeonClaim.js';
 import { registerRunRoutes } from './routes/runs.js';
+import { DEFAULT_RATE_LIMIT_RULES, MemoryRateLimiter } from './lib/rateLimit.js';
 
 export interface ServerDeps {
   readonly chain?: ChainClient;
@@ -136,6 +138,8 @@ export interface ServerDeps {
    */
   readonly ownerAddress?: string | null;
   readonly logger?: boolean;
+  /** Disable only in focused tests that intentionally exceed public limits. */
+  readonly rateLimit?: boolean;
   /**
    * Run the free-dungeon spawner in-process. Off by default so tests control
    * spawn state exactly; `npm run dev` and production turn it on.
@@ -192,6 +196,10 @@ export interface ServerDeps {
 
 export async function buildServer(deps: ServerDeps = {}): Promise<FastifyInstance> {
   const app = Fastify({
+    bodyLimit: 256 * 1024,
+    requestTimeout: 30_000,
+    connectionTimeout: 15_000,
+    trustProxy: false,
     logger: deps.logger === false
       ? false
       : {
@@ -207,6 +215,26 @@ export async function buildServer(deps: ServerDeps = {}): Promise<FastifyInstanc
   });
 
   await app.register(cors, { origin: config.webOrigins, credentials: true });
+
+  app.addHook('onSend', async (_request, reply) => {
+    reply.header('x-content-type-options', 'nosniff');
+    reply.header('x-frame-options', 'DENY');
+    reply.header('referrer-policy', 'strict-origin-when-cross-origin');
+    reply.header('permissions-policy', 'camera=(), microphone=(), geolocation=()');
+    // The API serves JSON/bytes only; deny script, framing, and cross-origin
+    // embedding by default. The web app has its own CSP at its origin.
+    reply.header('content-security-policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
+    if (config.network === 'mainnet') {
+      reply.header('strict-transport-security', 'max-age=31536000; includeSubDomains');
+    }
+  });
+
+  if (deps.rateLimit !== false) {
+    const limiter = new MemoryRateLimiter(DEFAULT_RATE_LIMIT_RULES);
+    // preHandler runs after body parsing, which is required for the
+    // address-scoped /auth/verify bucket.
+    app.addHook('preHandler', async (request, reply) => limiter.check(request, reply));
+  }
 
   const stacks = deps.stacks ?? config.stacks;
   const chain =
@@ -400,6 +428,7 @@ export async function buildServer(deps: ServerDeps = {}): Promise<FastifyInstanc
   await registerForgeRoutes(app, { forge, stacks, jwtSecret });
 
   await registerLeaderboardRoutes(app, { playerStats: playerStatsStore });
+  await registerProfileRoutes(app, { chain, playerStats: playerStatsStore, jwtSecret });
 
   await registerDungeonRoutes(app, {
     spawns: spawnStore,

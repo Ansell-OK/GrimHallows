@@ -34,6 +34,20 @@ export interface ProxiedImage {
   readonly body: Buffer;
 }
 
+const MAX_CONCURRENT_IMAGE_FETCHES = 8;
+let activeImageFetches = 0;
+const imageWaiters: Array<() => void> = [];
+
+async function acquireImageSlot(): Promise<() => void> {
+  if (activeImageFetches < MAX_CONCURRENT_IMAGE_FETCHES) {
+    activeImageFetches += 1;
+    return () => { activeImageFetches -= 1; imageWaiters.shift()?.(); };
+  }
+  await new Promise<void>((resolve) => imageWaiters.push(resolve));
+  activeImageFetches += 1;
+  return () => { activeImageFetches -= 1; imageWaiters.shift()?.(); };
+}
+
 /**
  * Read a response body, refusing anything over the cap.
  *
@@ -150,7 +164,12 @@ export async function registerImageProxyRoutes(
 ): Promise<void> {
   app.get('/image-proxy', async (request, reply) => {
     const url = String((request.query as { url?: unknown } | undefined)?.url ?? '');
-    const image = await fetchProxiedImage(url, deps.fetchImpl ?? fetch);
-    return sendImage(reply, image);
+    const release = await acquireImageSlot();
+    try {
+      const image = await fetchProxiedImage(url, deps.fetchImpl ?? fetch);
+      return sendImage(reply, image);
+    } finally {
+      release();
+    }
   });
 }

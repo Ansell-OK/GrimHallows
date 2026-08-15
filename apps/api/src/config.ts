@@ -83,6 +83,13 @@ export function parseOriginList(raw: string): string[] {
   if (origins.length === 0) {
     throw new Error('WEB_ORIGIN was set but contained no origins');
   }
+  for (const origin of origins) {
+    let parsed: URL;
+    try { parsed = new URL(origin); } catch { throw new Error(`WEB_ORIGIN contains an invalid origin: ${origin}`); }
+    if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || parsed.pathname !== '/' || parsed.search || parsed.hash || parsed.username || parsed.password) {
+      throw new Error(`WEB_ORIGIN must contain bare http(s) origins: ${origin}`);
+    }
+  }
   return origins;
 }
 
@@ -147,4 +154,19 @@ export function ownerAddress(): string {
  */
 export function ownerAddressOrNull(): string | null {
   return optional('OWNER_ADDRESS') || null;
+}
+
+/**
+ * Reject credentials that must never enter the hosted API's blast radius.
+ * Local operator scripts share the root .env, so this is called by the hosted
+ * entrypoint rather than during ordinary module loading.
+ */
+export function assertHostedApiKeySeparation(
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  const forbidden = ['OWNER_PRIVATE_KEY', 'DEPLOYER_PRIVATE_KEY']
+    .filter((name) => env[name]?.trim());
+  if (forbidden.length) {
+    throw new Error(`Hosted API environment contains forbidden credential(s): ${forbidden.join(', ')}`);
+  }
 }

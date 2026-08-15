@@ -1,0 +1,8 @@
+{
+  "ws": {
+    "owner": "web-wallet",
+    "expires": "2026-09-15",
+    "rationale": "Transitive through @stacks/connect 8.2.6 and Reown/WalletConnect. npm's fix is a breaking downgrade to 8.1.9; Leather, Xverse, reconnect, cancellation, transaction signing, message signing, and mobile handoff must pass before changing this boundary.",
+    "compensatingControl": "Wallet connectivity is client-side; API request and connection limits do not expose a websocket server. Keep dependencies audited weekly and retest when Stacks Connect publishes a compatible fixed path."
+  }
+}

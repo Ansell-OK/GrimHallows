@@ -78,6 +78,38 @@ describe('auth routes', () => {
     expect(a).toMatch(/^grimhallow-login-[0-9a-f]{64}$/);
   });
 
+  it('rate-limits challenge abuse with a retry hint', async () => {
+    for (let i = 0; i < 10; i++) expect((await app.inject({ method: 'POST', url: '/auth/challenge' })).statusCode).toBe(200);
+    const limited = await app.inject({ method: 'POST', url: '/auth/challenge' });
+    expect(limited.statusCode).toBe(429);
+    expect(limited.headers['retry-after']).toBeTruthy();
+    expect(limited.json().error.code).toBe('RATE_LIMITED');
+  });
+
+  it('keys verify limits by claimed address as well as IP', async () => {
+    for (let i = 0; i < 5; i++) {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/auth/verify',
+        payload: { address: ADDRESS, signature: 'x', challenge: 'x' },
+      });
+      expect([400, 401]).toContain(response.statusCode);
+    }
+    const limited = await app.inject({
+      method: 'POST',
+      url: '/auth/verify',
+      payload: { address: ADDRESS, signature: 'x', challenge: 'x' },
+    });
+    expect(limited.statusCode).toBe(429);
+    const otherAddress = getAddressFromPrivateKey(OTHER_KEY, 'testnet');
+    const isolated = await app.inject({
+      method: 'POST',
+      url: '/auth/verify',
+      payload: { address: otherAddress, signature: 'x', challenge: 'x' },
+    });
+    expect([400, 401]).toContain(isolated.statusCode);
+  });
+
   it('issues a session token for a correctly signed challenge', async () => {
     const challenge = await getChallenge();
     const res = await app.inject({

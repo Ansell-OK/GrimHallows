@@ -68,12 +68,15 @@ const isServerless = !!process.env.VERCEL;
  */
 export function sslConfig(connectionString: string): pg.ConnectionConfig['ssl'] {
   const explicit = process.env.DATABASE_SSL?.trim().toLowerCase();
-  if (explicit === 'false' || explicit === 'off') return undefined;
-
   const isLocal = /@(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(connectionString);
+  const ca = process.env.DATABASE_SSL_CA?.trim();
+
+  if (process.env.VERCEL && !isLocal && !ca) {
+    throw new Error('DATABASE_SSL_CA is required for remote database connections on Vercel');
+  }
+  if (explicit === 'false' || explicit === 'off') return undefined;
   if (explicit !== 'true' && explicit !== 'on' && isLocal) return undefined;
 
-  const ca = process.env.DATABASE_SSL_CA?.trim();
   return ca ? { ca, rejectUnauthorized: true } : { rejectUnauthorized: false };
 }
 
