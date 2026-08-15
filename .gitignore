@@ -19,6 +19,10 @@ build/
 .env.*
 !.env.example
 
+# Deployment certificates are environment secrets, not repository assets.
+security/*.crt
+security/*.pem
+
 # Scratch file for a plaintext seed phrase, read by scripts/derive-oracle-key.mjs
 # and meant to be deleted right after. Ignored by exact name AND by suffix so a
 # renamed copy (oracle-mnemonic.bak, my.mnemonic) can't slip through.
