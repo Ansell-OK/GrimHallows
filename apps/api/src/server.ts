@@ -482,6 +482,7 @@ export async function buildServer(deps: ServerDeps = {}): Promise<FastifyInstanc
   await registerRunRoutes(app, {
     combat,
     runs: runStore,
+    partyAccess: async (partyId, address) => (await partyStore.current(address))?.id === partyId,
     jwtSecret,
   });
 

@@ -21,7 +21,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { PlayerAction } from '@grimhallow/shared';
 import { RunOracleError } from '../oracle/runOracle.js';
-import { requireRunAccess } from '../lib/authGuard.js';
+import { requireRunAccess, requireSession } from '../lib/authGuard.js';
 import { ApiError, badRequest, notFound } from '../lib/errors.js';
 import type { CombatService } from '../services/combatService.js';
 import type { RunStore } from '../repos/runs.js';
@@ -30,6 +30,7 @@ export interface RunRouteDeps {
   readonly combat: CombatService;
   readonly runs: RunStore;
   readonly jwtSecret: string;
+  readonly partyAccess?: (partyId: string, address: string) => Promise<boolean>;
 }
 
 /** Translate an oracle refusal into the spec's error envelope. */
@@ -57,6 +58,16 @@ function parseAction(body: unknown): PlayerAction {
   return { powerId: b.powerId, targetId: (b.targetId as string | undefined) ?? null };
 }
 
+async function requireRunOrPartyAccess(request: Parameters<typeof requireRunAccess>[0], deps: RunRouteDeps, runId: string, run: { createdBy: string; partyId: string | null }) {
+  try { return requireRunAccess(request, deps.jwtSecret, runId, run.createdBy); }
+  catch (error) {
+    if (!run.partyId || !deps.partyAccess) throw error;
+    const session = requireSession(request, deps.jwtSecret);
+    if (!(await deps.partyAccess(run.partyId, session.sub))) throw error;
+    return session;
+  }
+}
+
 export async function registerRunRoutes(
   app: FastifyInstance,
   deps: RunRouteDeps,
@@ -67,7 +78,7 @@ export async function registerRunRoutes(
     const run = await deps.runs.findById(runId);
     if (!run) throw notFound('RUN_NOT_FOUND', `No run with id ${runId}`);
 
-    const claims = requireRunAccess(request, deps.jwtSecret, runId, run.createdBy);
+    const claims = await requireRunOrPartyAccess(request, deps, runId, run);
     const action = parseAction(request.body);
 
     try {
@@ -87,7 +98,7 @@ export async function registerRunRoutes(
     // encounter view is privileged information — the monster roster and the
     // initiative order are both derived from a seed nobody else should see the
     // consequences of yet.
-    requireRunAccess(request, deps.jwtSecret, runId, run.createdBy);
+    await requireRunOrPartyAccess(request, deps, runId, run);
 
     try {
       const response = await deps.combat.get(runId);
