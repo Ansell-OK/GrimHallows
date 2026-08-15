@@ -28,13 +28,12 @@ import type {
   PlayerAction,
   PowerUpNft,
   RunResponse,
-} from '@grimhallow/shared';
-import { loadSession } from './session';
+} from "@grimhallow/shared";
+import { loadSession } from "./session";
 
-export const API_URL = (import.meta.env.VITE_API_URL ?? 'http://localhost:8080').replace(
-  /\/+$/,
-  '',
-);
+export const API_URL = (
+  import.meta.env.VITE_API_URL ?? "http://localhost:8080"
+).replace(/\/+$/, "");
 
 /** An error the API reported in its documented `{ error: { code, message } }` shape. */
 export class ApiRequestError extends Error {
@@ -44,21 +43,21 @@ export class ApiRequestError extends Error {
     readonly status: number,
   ) {
     super(message);
-    this.name = 'ApiRequestError';
+    this.name = "ApiRequestError";
   }
 }
 
 /** Thrown when the API could not be reached at all (offline, CORS, DNS). */
 export class NetworkError extends Error {
   constructor(cause?: unknown) {
-    super('Could not reach the GrimHallow server.');
-    this.name = 'NetworkError';
+    super("Could not reach the GrimHallow server.");
+    this.name = "NetworkError";
     this.cause = cause;
   }
 }
 
 interface RequestOptions {
-  readonly method?: 'GET' | 'POST';
+  readonly method?: "GET" | "POST";
   readonly body?: unknown;
   /** Send the stored session token, if there is one. Default true. */
   readonly authenticated?: boolean;
@@ -73,12 +72,21 @@ interface RequestOptions {
   readonly signal?: AbortSignal;
 }
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, authenticated = true, runToken, signal } = options;
+async function request<T>(
+  path: string,
+  options: RequestOptions = {},
+): Promise<T> {
+  const {
+    method = "GET",
+    body,
+    authenticated = true,
+    runToken,
+    signal,
+  } = options;
 
   const headers: Record<string, string> = {};
-  if (body !== undefined) headers['content-type'] = 'application/json';
-  if (runToken) headers['x-run-token'] = runToken;
+  if (body !== undefined) headers["content-type"] = "application/json";
+  if (runToken) headers["x-run-token"] = runToken;
   if (authenticated) {
     const session = loadSession();
     if (session) headers.authorization = `Bearer ${session.token}`;
@@ -94,7 +102,8 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     });
   } catch (cause) {
     // Let an aborted request propagate as-is so callers can ignore it.
-    if (cause instanceof DOMException && cause.name === 'AbortError') throw cause;
+    if (cause instanceof DOMException && cause.name === "AbortError")
+      throw cause;
     throw new NetworkError(cause);
   }
 
@@ -103,7 +112,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   if (!response.ok) {
     const err = (payload as ApiError | null)?.error;
     throw new ApiRequestError(
-      err?.code ?? 'UNKNOWN_ERROR',
+      err?.code ?? "UNKNOWN_ERROR",
       err?.message ?? `Request failed with status ${response.status}.`,
       response.status,
     );
@@ -129,7 +138,7 @@ export interface VerifyResponse {
 
 /** Ask for a fresh nonce to sign. Single-use and short-lived server-side. */
 export function requestChallenge(): Promise<ChallengeResponse> {
-  return request('/auth/challenge', { method: 'POST', authenticated: false });
+  return request("/auth/challenge", { method: "POST", authenticated: false });
 }
 
 /**
@@ -143,7 +152,11 @@ export function verifySignature(input: {
   signature: string;
   challenge: string;
 }): Promise<VerifyResponse> {
-  return request('/auth/verify', { method: 'POST', body: input, authenticated: false });
+  return request("/auth/verify", {
+    method: "POST",
+    body: input,
+    authenticated: false,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -159,12 +172,18 @@ export function getCharacters(
   address: string,
   signal?: AbortSignal,
 ): Promise<CharactersResponse> {
-  return request(`/characters?address=${encodeURIComponent(address)}`, { signal });
+  return request(`/characters?address=${encodeURIComponent(address)}`, {
+    signal,
+  });
 }
 
 export interface ProfileResponse {
   readonly address: string;
-  readonly identity: { readonly address: string; readonly displayName: string; readonly bnsName: string | null };
+  readonly identity: {
+    readonly address: string;
+    readonly displayName: string;
+    readonly bnsName: string | null;
+  };
   readonly balanceUstx: string | null;
   readonly rank: number | null;
   readonly score: number;
@@ -176,7 +195,7 @@ export interface ProfileResponse {
 }
 
 export function getProfile(signal?: AbortSignal): Promise<ProfileResponse> {
-  return request('/profile', { signal });
+  return request("/profile", { signal });
 }
 
 export interface NotificationRecord {
@@ -188,32 +207,103 @@ export interface NotificationRecord {
   readonly createdAt: string;
 }
 
-export function getNotifications(signal?: AbortSignal): Promise<{ notifications: NotificationRecord[] }> {
-  return request('/notifications', { signal });
+export function getNotifications(
+  signal?: AbortSignal,
+): Promise<{ notifications: NotificationRecord[] }> {
+  return request("/notifications", { signal });
 }
 
-export interface PartyMemberRecord { readonly address: string; readonly role: 'leader' | 'member'; readonly ready: boolean; readonly nftContractId: string | null; readonly nftTokenId: string | null; }
-export interface PartyRecord { readonly id: string; readonly inviteCode: string; readonly createdBy: string; readonly members: readonly PartyMemberRecord[]; }
-export interface PartyInvite { readonly id: string; readonly partyId: string; readonly inviterAddress: string; readonly expiresAt: string; }
-export function getCurrentParty(): Promise<{ party: PartyRecord | null }> { return request('/parties/current'); }
-export function createParty(): Promise<{ party: PartyRecord }> { return request('/parties', { method: 'POST' }); }
-export function leaveParty(id: string): Promise<{ outcome: string }> { return request(`/parties/${encodeURIComponent(id)}/leave`, { method: 'POST' }); }
-export function setPartyReady(id: string, ready: boolean): Promise<{ ready: boolean }> { return request(`/parties/${encodeURIComponent(id)}/ready`, { method: 'POST', body: { ready } }); }
-export function setPartyCharacter(id: string, contractId: string, tokenId: string): Promise<{ character: { contractId: string; tokenId: string }; ready: boolean }> { return request(`/parties/${encodeURIComponent(id)}/character`, { method: 'POST', body: { contractId, tokenId } }); }
-export function createPartyInvite(id: string, address: string): Promise<{ invite: PartyInvite }> { return request(`/parties/${encodeURIComponent(id)}/invites`, { method: 'POST', body: { address } }); }
-export function getPartyInvites(): Promise<{ invites: PartyInvite[] }> { return request('/party-invites'); }
-export function respondPartyInvite(id: string, accept: boolean): Promise<{ outcome: string }> { return request(`/party-invites/${encodeURIComponent(id)}/respond`, { method: 'POST', body: { accept } }); }
+export interface PartyMemberRecord {
+  readonly address: string;
+  readonly role: "leader" | "member";
+  readonly ready: boolean;
+  readonly nftContractId: string | null;
+  readonly nftTokenId: string | null;
+}
+export interface PartyRecord {
+  readonly id: string;
+  readonly inviteCode: string;
+  readonly createdBy: string;
+  readonly members: readonly PartyMemberRecord[];
+}
+export interface PartyInvite {
+  readonly id: string;
+  readonly partyId: string;
+  readonly inviterAddress: string;
+  readonly expiresAt: string;
+}
+export function getCurrentParty(): Promise<{ party: PartyRecord | null }> {
+  return request("/parties/current");
+}
+export function createParty(): Promise<{ party: PartyRecord }> {
+  return request("/parties", { method: "POST" });
+}
+export function leaveParty(id: string): Promise<{ outcome: string }> {
+  return request(`/parties/${encodeURIComponent(id)}/leave`, {
+    method: "POST",
+  });
+}
+export function kickPartyMember(id: string, address: string): Promise<{ kicked: string }> {
+  return request(`/parties/${encodeURIComponent(id)}/kick`, { method: "POST", body: { address } });
+}
+export function setPartyReady(
+  id: string,
+  ready: boolean,
+): Promise<{ ready: boolean }> {
+  return request(`/parties/${encodeURIComponent(id)}/ready`, {
+    method: "POST",
+    body: { ready },
+  });
+}
+export function setPartyCharacter(
+  id: string,
+  contractId: string,
+  tokenId: string,
+): Promise<{
+  character: { contractId: string; tokenId: string };
+  ready: boolean;
+}> {
+  return request(`/parties/${encodeURIComponent(id)}/character`, {
+    method: "POST",
+    body: { contractId, tokenId },
+  });
+}
+export function createPartyInvite(
+  id: string,
+  address: string,
+): Promise<{ invite: PartyInvite }> {
+  return request(`/parties/${encodeURIComponent(id)}/invites`, {
+    method: "POST",
+    body: { address },
+  });
+}
+export function getPartyInvites(): Promise<{ invites: PartyInvite[] }> {
+  return request("/party-invites");
+}
+export function respondPartyInvite(
+  id: string,
+  accept: boolean,
+): Promise<{ outcome: string }> {
+  return request(`/party-invites/${encodeURIComponent(id)}/respond`, {
+    method: "POST",
+    body: { accept },
+  });
+}
 
-export function getNotificationUnreadCount(signal?: AbortSignal): Promise<{ unreadCount: number }> {
-  return request('/notifications/unread-count', { signal });
+export function getNotificationUnreadCount(
+  signal?: AbortSignal,
+): Promise<{ unreadCount: number }> {
+  return request("/notifications/unread-count", { signal });
 }
 
 export function markNotificationRead(id: string): Promise<{ read: boolean }> {
-  return request(`/notifications/${encodeURIComponent(id)}/read`, { method: 'PATCH' });
+  return request(`/notifications/${encodeURIComponent(id)}/read`, {
+    method: "PATCH",
+  });
 }
 
 export function markAllNotificationsRead(): Promise<{ markedRead: number }> {
-  return request('/notifications/read-all', { method: 'POST' });
+  return request("/notifications/read-all", { method: "POST" });
 }
 
 // ---------------------------------------------------------------------------
@@ -288,7 +378,7 @@ export function getPowerUps(
  * whether to spend. Show it as unavailable instead.
  */
 export function getMap(signal?: AbortSignal): Promise<MapResponse> {
-  return request('/map', { authenticated: false, signal });
+  return request("/map", { authenticated: false, signal });
 }
 
 /**
@@ -320,7 +410,7 @@ export function enterFreeDungeon(
   signal?: AbortSignal,
 ): Promise<FreeEntryResponse> {
   return request(`/dungeons/${encodeURIComponent(spawnId)}/enter`, {
-    method: 'POST',
+    method: "POST",
     body: { character, powerUpTokenIds },
     signal,
   });
@@ -355,7 +445,7 @@ export function enterPaidDungeon(
   signal?: AbortSignal,
 ): Promise<PaidEntryResponse> {
   return request(`/dungeons/${dungeonId}/enter`, {
-    method: 'POST',
+    method: "POST",
     body: { character },
     signal,
   });
@@ -381,7 +471,7 @@ export function claimPaidRun(
   signal?: AbortSignal,
 ): Promise<PaidRunReadyResponse> {
   return request(`/dungeons/${dungeonId}/claim`, {
-    method: 'POST',
+    method: "POST",
     body: { enterTxId, character, powerUpTokenIds },
     signal,
   });
@@ -425,7 +515,7 @@ export function submitAction(
   signal?: AbortSignal,
 ): Promise<ActionResponse> {
   return request(`/runs/${encodeURIComponent(runId)}/actions`, {
-    method: 'POST',
+    method: "POST",
     body: action,
     runToken,
     signal,
@@ -449,8 +539,10 @@ export interface ForgeRecipesResponse {
  * that no longer matches the contract would destroy real tokens on a recipe that
  * does not exist. Show the failure; never fill the gap with constants.
  */
-export function getForgeRecipes(signal?: AbortSignal): Promise<ForgeRecipesResponse> {
-  return request('/forge/recipes', { authenticated: false, signal });
+export function getForgeRecipes(
+  signal?: AbortSignal,
+): Promise<ForgeRecipesResponse> {
+  return request("/forge/recipes", { authenticated: false, signal });
 }
 
 /**
@@ -482,8 +574,8 @@ export function buildForge(
   tokenIds: readonly string[],
   signal?: AbortSignal,
 ): Promise<ForgeTxResponse> {
-  return request('/forge', {
-    method: 'POST',
+  return request("/forge", {
+    method: "POST",
     body: { recipeId, tokenIds },
     signal,
   });
@@ -503,8 +595,10 @@ export function buildForge(
  * `classes` is the same four the contract accepts and the shared derivation
  * uses, published so a picker does not hardcode them a third time.
  */
-export function getMintQuote(signal?: AbortSignal): Promise<CharacterMintQuoteResponse> {
-  return request('/characters/mint', { authenticated: false, signal });
+export function getMintQuote(
+  signal?: AbortSignal,
+): Promise<CharacterMintQuoteResponse> {
+  return request("/characters/mint", { authenticated: false, signal });
 }
 
 /**
@@ -526,8 +620,8 @@ export function buildMintCharacter(
   classId: CharClass,
   signal?: AbortSignal,
 ): Promise<MintCharacterTxResponse> {
-  return request('/characters/mint', {
-    method: 'POST',
+  return request("/characters/mint", {
+    method: "POST",
     body: { classId },
     signal,
   });
@@ -552,7 +646,7 @@ export function buildMintCharacter(
  * the one it was handed — see `Leaderboard.tsx`.
  */
 export function getLeaderboard(
-  window: LeaderboardWindow = 'all',
+  window: LeaderboardWindow = "all",
   signal?: AbortSignal,
 ): Promise<LeaderboardResponse> {
   return request(`/leaderboard?window=${encodeURIComponent(window)}`, {
@@ -566,18 +660,21 @@ export function getLeaderboard(
 // ---------------------------------------------------------------------------
 
 export interface ConfigResponse {
-  readonly network: 'devnet' | 'testnet' | 'mainnet';
+  readonly network: "devnet" | "testnet" | "mainnet";
   readonly explorerUrl: string;
   readonly contracts: Record<string, string>;
 }
 
 export function getConfig(signal?: AbortSignal): Promise<ConfigResponse> {
-  return request('/config', { authenticated: false, signal });
+  return request("/config", { authenticated: false, signal });
 }
 
 /** Explorer link for a principal — contract or standard address. */
-export function explorerAddressLink(config: ConfigResponse, principal: string): string {
-  const chain = config.network === 'mainnet' ? 'mainnet' : 'testnet';
+export function explorerAddressLink(
+  config: ConfigResponse,
+  principal: string,
+): string {
+  const chain = config.network === "mainnet" ? "mainnet" : "testnet";
   return `${config.explorerUrl}/address/${encodeURIComponent(principal)}?chain=${chain}`;
 }
 
@@ -589,13 +686,14 @@ export function explorerAddressLink(config: ConfigResponse, principal: string): 
  * app is down or wrong about what happened.
  */
 export function explorerTxLink(config: ConfigResponse, txId: string): string {
-  const chain = config.network === 'mainnet' ? 'mainnet' : 'testnet';
+  const chain = config.network === "mainnet" ? "mainnet" : "testnet";
   return `${config.explorerUrl}/txid/${encodeURIComponent(txId)}?chain=${chain}`;
 }
 
 /** Human-readable text for an error from any of the calls above. */
 export function errorMessage(err: unknown): string {
-  if (err instanceof ApiRequestError || err instanceof NetworkError) return err.message;
+  if (err instanceof ApiRequestError || err instanceof NetworkError)
+    return err.message;
   if (err instanceof Error) return err.message;
-  return 'Something went wrong.';
+  return "Something went wrong.";
 }
