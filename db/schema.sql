@@ -511,3 +511,14 @@ create table if not exists job_leases (
   lease_until timestamptz not null
 );
 
+create table if not exists notifications (
+  id uuid primary key,
+  address text not null,
+  type text not null,
+  payload_json jsonb not null default '{}'::jsonb,
+  read boolean not null default false,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists notifications_address_unread_idx
+  on notifications (address, read, created_at desc);

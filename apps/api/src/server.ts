@@ -77,6 +77,7 @@ import { ForgeService } from './services/forgeService.js';
 import { MapService } from './services/mapService.js';
 import { PaidEntryService } from './services/paidEntryService.js';
 import { PowerUpService } from './services/powerUpService.js';
+import { IdentityService } from './services/identityService.js';
 import { DEFAULT_SPAWNER_CONFIG, DungeonSpawner, type SpawnerConfig } from './services/spawner.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerAdminRoutes } from './routes/admin.js';
@@ -90,6 +91,8 @@ import { registerProfileRoutes } from './routes/profile.js';
 import { registerMapRoutes } from './routes/map.js';
 import { registerPaidClaimRoutes } from './routes/paidDungeonClaim.js';
 import { registerRunRoutes } from './routes/runs.js';
+import { registerNotificationRoutes } from './routes/notifications.js';
+import { MemoryNotificationStore, PostgresNotificationStore, type NotificationStore } from './repos/notifications.js';
 import { DEFAULT_RATE_LIMIT_RULES, MemoryRateLimiter } from './lib/rateLimit.js';
 
 export interface ServerDeps {
@@ -239,10 +242,14 @@ export async function buildServer(deps: ServerDeps = {}): Promise<FastifyInstanc
   const stacks = deps.stacks ?? config.stacks;
   const chain =
     deps.chain ?? new HiroChainClient(stacks.apiUrl, config.hiroApiKey);
+  const identity = new IdentityService(chain);
   // Postgres-backed by default; in-memory when there is no DATABASE_URL, so a
   // fresh clone can boot and exercise the flow before docker compose is up.
   const authStore =
     deps.authStore ?? (config.databaseUrl ? new PostgresAuthStore() : new MemoryAuthStore());
+  const notificationStore: NotificationStore = config.databaseUrl
+    ? new PostgresNotificationStore()
+    : new MemoryNotificationStore();
   const characterCache =
     deps.characterCache ??
     (config.databaseUrl ? new PostgresCharacterCache() : new NullCharacterCache());
@@ -427,8 +434,9 @@ export async function buildServer(deps: ServerDeps = {}): Promise<FastifyInstanc
 
   await registerForgeRoutes(app, { forge, stacks, jwtSecret });
 
-  await registerLeaderboardRoutes(app, { playerStats: playerStatsStore });
-  await registerProfileRoutes(app, { chain, playerStats: playerStatsStore, jwtSecret });
+  await registerLeaderboardRoutes(app, { playerStats: playerStatsStore, identity });
+  await registerProfileRoutes(app, { chain, playerStats: playerStatsStore, jwtSecret, identity });
+  await registerNotificationRoutes(app, { notifications: notificationStore, jwtSecret });
 
   await registerDungeonRoutes(app, {
     spawns: spawnStore,
