@@ -199,6 +199,7 @@ export function getCurrentParty(): Promise<{ party: PartyRecord | null }> { retu
 export function createParty(): Promise<{ party: PartyRecord }> { return request('/parties', { method: 'POST' }); }
 export function leaveParty(id: string): Promise<{ outcome: string }> { return request(`/parties/${encodeURIComponent(id)}/leave`, { method: 'POST' }); }
 export function setPartyReady(id: string, ready: boolean): Promise<{ ready: boolean }> { return request(`/parties/${encodeURIComponent(id)}/ready`, { method: 'POST', body: { ready } }); }
+export function setPartyCharacter(id: string, contractId: string, tokenId: string): Promise<{ character: { contractId: string; tokenId: string }; ready: boolean }> { return request(`/parties/${encodeURIComponent(id)}/character`, { method: 'POST', body: { contractId, tokenId } }); }
 export function createPartyInvite(id: string, address: string): Promise<{ invite: PartyInvite }> { return request(`/parties/${encodeURIComponent(id)}/invites`, { method: 'POST', body: { address } }); }
 export function getPartyInvites(): Promise<{ invites: PartyInvite[] }> { return request('/party-invites'); }
 export function respondPartyInvite(id: string, accept: boolean): Promise<{ outcome: string }> { return request(`/party-invites/${encodeURIComponent(id)}/respond`, { method: 'POST', body: { accept } }); }
