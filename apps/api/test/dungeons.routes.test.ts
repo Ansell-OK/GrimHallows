@@ -24,6 +24,7 @@ import {
 } from '@grimhallow/shared';
 import { buildServer } from '../src/server.js';
 import { MemoryRunStore } from '../src/repos/runs.js';
+import { MemoryPartyStore } from '../src/repos/parties.js';
 import { MemorySpawnStore, type SpawnRecord } from '../src/repos/spawns.js';
 import { issueToken, verifyRunToken, verifyToken } from '../src/lib/jwt.js';
 import {
@@ -59,6 +60,7 @@ describe('POST /dungeons/:id/enter', () => {
   let app: FastifyInstance;
   let spawns: MemorySpawnStore;
   let runs: MemoryRunStore;
+  let parties: MemoryPartyStore;
   let gameCore: FakeGameCore;
   let session: string;
   let spawn: SpawnRecord;
@@ -66,11 +68,23 @@ describe('POST /dungeons/:id/enter', () => {
   beforeEach(async () => {
     spawns = new MemorySpawnStore();
     runs = new MemoryRunStore();
+    parties = new MemoryPartyStore();
     gameCore = new FakeGameCore();
     app = await buildServer({
-      chain: stubChain({ callReadOnly: (params) => gameCore.callReadOnly(params) }),
+      chain: stubChain({
+        getNftHoldings: async () => [{
+          assetIdentifier: `${CHARACTER.contractId}::character`,
+          contractId: CHARACTER.contractId,
+          assetName: 'character',
+          tokenId: CHARACTER.tokenId,
+          blockHeight: 1,
+          txId: '0xcharacter',
+        }],
+        callReadOnly: (params) => gameCore.callReadOnly(params),
+      }),
       spawnStore: spawns,
       runStore: runs,
+      partyStore: parties,
       oracleSigner: testOracleSigner(),
       oraclePrivateKey: TEST_ORACLE_KEY,
       jwtSecret: JWT_SECRET,
@@ -722,11 +736,30 @@ describe('POST /dungeons/:id/enter', () => {
   });
 
   describe('parties', () => {
-    it('501s on a partyId instead of silently dropping it', async () => {
+    it('rejects an unknown free party instead of silently dropping it', async () => {
       const res = await enter(spawn.id, { body: { partyId: 'some-party' } });
+      expect(res.statusCode).toBe(404);
+      expect(res.json().error.code).toBe('PARTY_NOT_FOUND');
+      expect(runs.all()).toHaveLength(0);
+    });
+
+    it('keeps paid party entry disabled', async () => {
+      const res = await enter(String(PAID_DUNGEON_ID), { body: { partyId: 'some-party' } });
       expect(res.statusCode).toBe(501);
       expect(res.json().error.code).toBe('PARTY_RUNS_NOT_ENABLED');
-      expect(runs.all()).toHaveLength(0);
+    });
+
+    it('starts a free run from a prepared party snapshot', async () => {
+      const created = await parties.create(PLAYER);
+      if (created.kind !== 'created') throw new Error('party fixture failed');
+      await parties.setCharacter(created.party.id, PLAYER, CHARACTER.contractId, CHARACTER.tokenId);
+      await parties.setReady(created.party.id, PLAYER, true);
+      const res = await enter(spawn.id, { body: { partyId: created.party.id } });
+      expect(res.statusCode).toBe(200);
+      const stored = await runs.findById(res.json().runId);
+      expect(stored?.partyId).toBe(created.party.id);
+      expect(stored?.character).toBeNull();
+      expect(stored?.setup?.party).toEqual([expect.objectContaining({ id: 'p0', address: PLAYER })]);
     });
 
     it('accepts an explicitly null partyId as a solo run', async () => {

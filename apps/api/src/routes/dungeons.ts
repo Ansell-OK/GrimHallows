@@ -48,6 +48,8 @@ import type { SpawnStore } from '../repos/spawns.js';
 import type { CombatService } from '../services/combatService.js';
 import type { MapService } from '../services/mapService.js';
 import type { PowerUpService } from '../services/powerUpService.js';
+import type { PartyStore } from '../repos/parties.js';
+import type { CharacterService } from '../services/characterService.js';
 
 /**
  * How long a run token stays valid.
@@ -83,6 +85,8 @@ export interface DungeonRouteDeps {
   readonly map: MapService;
   /** Verifies an equipped loadout against chain and reads its tiers. */
   readonly powerUps: PowerUpService;
+  readonly parties: PartyStore;
+  readonly characters: CharacterService;
   readonly stacks: NetworkConfig;
   readonly jwtSecret: string;
 }
@@ -198,7 +202,8 @@ export async function registerDungeonRoutes(
       throw badRequest('MISSING_DUNGEON_ID', 'A dungeon or spawn id is required');
     }
 
-    if (body.partyId !== undefined && body.partyId !== null) {
+    const partyId = typeof body.partyId === 'string' && body.partyId.trim() ? body.partyId.trim() : null;
+    if (/^\d+$/.test(id) && partyId) {
       // Better to refuse than to quietly drop the field: a player who thinks
       // they entered with their party and finds themselves alone has been
       // misled by us, not by the network. Checked before the paid branch too —
@@ -225,6 +230,27 @@ export async function registerDungeonRoutes(
         'SPAWN_EXPIRED',
         'That dungeon has closed. Pick another one from the map.',
       );
+    }
+
+    if (partyId) {
+      const prepared = await deps.parties.prepareEntry(partyId, session.sub);
+      if (prepared.kind === 'not_found') throw notFound('PARTY_NOT_FOUND', 'Party not found.');
+      if (prepared.kind === 'not_leader') throw conflict('PARTY_LEADER_REQUIRED', 'Only the party leader can enter a dungeon.');
+      if (prepared.kind === 'characters_missing') throw conflict('PARTY_CHARACTERS_REQUIRED', 'Every party member must select a character.');
+      if (prepared.kind === 'members_not_ready') throw conflict('PARTY_NOT_READY', 'Every party member must be ready.');
+      const members = await Promise.all(prepared.party.members.map(async (member) => {
+        const owned = await deps.characters.listForAddress(member.address);
+        const character = owned.find((candidate) => candidate.contractId === member.nftContractId && candidate.tokenId === member.nftTokenId);
+        if (!character) throw conflict('PARTY_CHARACTER_NOT_HELD', `${member.address} no longer holds the selected character.`);
+        return { address: member.address, character: { contractId: character.contractId, tokenId: character.tokenId }, displayName: character.name };
+      }));
+      const run = await deps.runs.createFreeRun({ spawnId: spawn.id, partyId, createdBy: session.sub, character: null });
+      const setup = await deps.combat.buildPartySetup(spawn.monsterTableId, members);
+      const committed = await deps.oracle.commit(run.id, setup);
+      const view = await deps.oracle.view(run.id);
+      if (!view || !committed.seedHash || !committed.commitSignature || !committed.committedAt) throw conflict('RUN_NOT_READY', 'The run could not be started. Try again.');
+      const { token, claims } = issueRunToken({ address: session.sub, runId: run.id, secret: deps.jwtSecret, ttlSeconds: RUN_TOKEN_TTL_SECONDS });
+      return { dungeonType: 'free', runId: run.id, spawnId: spawn.id, monsterTableId: spawn.monsterTableId, runToken: token, expiresAt: new Date(claims.exp * 1000).toISOString(), seedHash: committed.seedHash, oracleAddress: committed.oracleAddress ?? deps.oracle.oracleAddress, commitSignature: committed.commitSignature, committedAt: committed.committedAt.toISOString(), encounter: view.encounter } satisfies FreeEntryResponse;
     }
 
     const character = parseCharacter(body.character);

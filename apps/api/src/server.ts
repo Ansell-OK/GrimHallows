@@ -451,6 +451,8 @@ export async function buildServer(deps: ServerDeps = {}): Promise<FastifyInstanc
     combat,
     map,
     powerUps,
+    parties: partyStore,
+    characters: charactersService,
     stacks,
     jwtSecret,
   });
