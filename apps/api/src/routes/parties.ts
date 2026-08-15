@@ -99,4 +99,15 @@ export async function registerPartyRoutes(app: FastifyInstance, deps: { parties:
     if (outcome === 'not_member') throw notFound('PARTY_NOT_FOUND', 'Party or member not found.');
     return { character: { contractId, tokenId }, ready: false };
   });
+
+  app.post('/parties/:id/prepare-entry', async (request) => {
+    const { sub } = requireSession(request, deps.jwtSecret);
+    const { id } = request.params as { id: string };
+    const result = await deps.parties.prepareEntry(id, sub);
+    if (result.kind === 'not_found') throw notFound('PARTY_NOT_FOUND', 'Party not found.');
+    if (result.kind === 'not_leader') throw forbidden('PARTY_LEADER_REQUIRED', 'Only the party leader can start a dungeon.');
+    if (result.kind === 'characters_missing') throw conflict('PARTY_CHARACTERS_REQUIRED', 'Every party member must select a character.');
+    if (result.kind === 'members_not_ready') throw conflict('PARTY_NOT_READY', 'Every party member must be ready.');
+    return { partyId: result.party.id, members: result.party.members.map((member) => ({ address: member.address, character: { contractId: member.nftContractId!, tokenId: member.nftTokenId! } })) };
+  });
 }

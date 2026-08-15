@@ -29,6 +29,7 @@ export interface PartyInvite { readonly id: string; readonly partyId: string; re
 export type CreateInviteResult = { readonly kind: 'created' | 'existing'; readonly invite: PartyInvite } | { readonly kind: 'not_leader' | 'already_member' | 'self' | 'party_full' };
 export type RespondInviteResult = 'accepted' | 'declined' | 'not_found' | 'expired' | 'party_full' | 'already_member';
 export type PartyMutationResult = 'updated' | 'not_member' | 'forbidden' | 'invalid_target' | 'character_required';
+export type PreparePartyResult = { readonly kind: 'ready'; readonly party: PartyRecord } | { readonly kind: 'not_found' | 'not_leader' | 'characters_missing' | 'members_not_ready' };
 
 export interface PartyStore {
   create(address: string): Promise<CreatePartyResult>;
@@ -40,6 +41,7 @@ export interface PartyStore {
   setReady(partyId: string, address: string, ready: boolean): Promise<PartyMutationResult>;
   kick(partyId: string, leader: string, target: string): Promise<PartyMutationResult>;
   setCharacter(partyId: string, address: string, contractId: string, tokenId: string): Promise<PartyMutationResult>;
+  prepareEntry(partyId: string, leader: string): Promise<PreparePartyResult>;
 }
 
 interface InviteRow { id: string; party_id: string; inviter_address: string; invitee_address: string; status: InviteStatus; created_at: Date; expires_at: Date; responded_at: Date | null; }
@@ -235,6 +237,15 @@ export class PostgresPartyStore implements PartyStore {
     const result = await query<{ outcome: PartyMutationResult }>(`update party_members set nft_contract_id=$3, nft_token_id=$4, ready=false where party_id=$1 and address=$2 returning 'updated'::text as outcome`, [partyId, address, contractId, tokenId]);
     return result.rows[0]?.outcome ?? 'not_member';
   }
+
+  async prepareEntry(partyId: string, leader: string): Promise<PreparePartyResult> {
+    const party = await this.current(leader);
+    if (!party || party.id !== partyId) return { kind: 'not_found' };
+    if (!party.members.some((member) => member.address === leader && member.role === 'leader')) return { kind: 'not_leader' };
+    if (party.members.some((member) => !member.nftContractId || !member.nftTokenId)) return { kind: 'characters_missing' };
+    if (party.members.some((member) => !member.ready)) return { kind: 'members_not_ready' };
+    return { kind: 'ready', party };
+  }
 }
 
 export class MemoryPartyStore implements PartyStore {
@@ -328,5 +339,14 @@ export class MemoryPartyStore implements PartyStore {
     if (!party || !party.members.some((member) => member.address === address)) return 'not_member';
     this.parties.set(partyId, { ...party, members: party.members.map((member) => member.address === address ? { ...member, nftContractId: contractId, nftTokenId: tokenId, ready: false } : member) });
     return 'updated';
+  }
+
+  async prepareEntry(partyId: string, leader: string): Promise<PreparePartyResult> {
+    const party = this.parties.get(partyId);
+    if (!party || !party.members.some((member) => member.address === leader)) return { kind: 'not_found' };
+    if (!party.members.some((member) => member.address === leader && member.role === 'leader')) return { kind: 'not_leader' };
+    if (party.members.some((member) => !member.nftContractId || !member.nftTokenId)) return { kind: 'characters_missing' };
+    if (party.members.some((member) => !member.ready)) return { kind: 'members_not_ready' };
+    return { kind: 'ready', party };
   }
 }

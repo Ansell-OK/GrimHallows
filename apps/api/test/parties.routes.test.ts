@@ -117,4 +117,14 @@ describe('party routes', () => {
     expect(response.statusCode).toBe(409);
     expect((await store.current(ALICE))?.members[0].ready).toBe(false);
   });
+
+  it('prepares entry only for a leader whose members selected characters and are ready', async () => {
+    const created = await app.inject({ method: 'POST', url: '/parties', headers: auth(ALICE) });
+    const partyId = created.json().party.id;
+    expect((await app.inject({ method: 'POST', url: `/parties/${partyId}/prepare-entry`, headers: auth(ALICE) })).statusCode).toBe(409);
+    await app.inject({ method: 'POST', url: `/parties/${partyId}/character`, headers: auth(ALICE), payload: { contractId: 'SPTEST.character', tokenId: '7' } });
+    expect((await app.inject({ method: 'POST', url: `/parties/${partyId}/prepare-entry`, headers: auth(ALICE) })).statusCode).toBe(409);
+    await app.inject({ method: 'POST', url: `/parties/${partyId}/ready`, headers: auth(ALICE), payload: { ready: true } });
+    expect((await app.inject({ method: 'POST', url: `/parties/${partyId}/prepare-entry`, headers: auth(ALICE) })).json()).toEqual({ partyId, members: [{ address: ALICE, character: { contractId: 'SPTEST.character', tokenId: '7' } }] });
+  });
 });
