@@ -11,6 +11,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ApiRequestError,
+  BackendValidationError,
   NetworkError,
   buildForge,
   buildMintCharacter,
@@ -22,6 +23,7 @@ import {
   getCharacters,
   getForgeRecipes,
   getMap,
+  getCurrentParty,
   getMintQuote,
   getRun,
   requestChallenge,
@@ -121,6 +123,13 @@ describe('successful calls', () => {
     stubFetch(() => json({ address: 'x', characters: [] }));
     await getCharacters('ST1 & friends');
     expect(calls[0].url).toContain('address=ST1%20%26%20friends');
+  });
+});
+
+describe('backend response validation', () => {
+  it('rejects malformed party members before the UI consumes them', async () => {
+    stubFetch(() => json({ party: { id: 'p1', inviteCode: 'code', createdBy: 'ST1', members: [{ address: 'ST1', role: 'leader', ready: 'yes' }] } }));
+    await expect(getCurrentParty()).rejects.toBeInstanceOf(BackendValidationError);
   });
 });
 

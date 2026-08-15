@@ -56,6 +56,10 @@ export class NetworkError extends Error {
   }
 }
 
+export class BackendValidationError extends Error {
+  constructor(message: string) { super(message); this.name = "BackendValidationError"; }
+}
+
 interface RequestOptions {
   readonly method?: "GET" | "POST";
   readonly body?: unknown;
@@ -233,8 +237,24 @@ export interface PartyInvite {
   readonly inviterAddress: string;
   readonly expiresAt: string;
 }
-export function getCurrentParty(): Promise<{ party: PartyRecord | null }> {
-  return request("/parties/current");
+const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
+const string = (value: unknown): value is string => typeof value === "string";
+function validateParty(value: unknown): PartyRecord {
+  if (!object(value) || !string(value.id) || !string(value.inviteCode) || !string(value.createdBy) || !Array.isArray(value.members)) throw new BackendValidationError("The backend returned an invalid party record.");
+  const members = value.members.map((member) => {
+    if (!object(member) || !string(member.address) || (member.role !== "leader" && member.role !== "member") || typeof member.ready !== "boolean" || !(member.nftContractId === null || string(member.nftContractId)) || !(member.nftTokenId === null || string(member.nftTokenId)) || !object(member.identity) || !string(member.identity.address) || !string(member.identity.displayName) || !(member.identity.bnsName === null || string(member.identity.bnsName))) throw new BackendValidationError("The backend returned an invalid party member.");
+    return member as unknown as PartyMemberRecord;
+  });
+  return { id: value.id, inviteCode: value.inviteCode, createdBy: value.createdBy, members };
+}
+function validateInvite(value: unknown): PartyInvite {
+  if (!object(value) || !string(value.id) || !string(value.partyId) || !string(value.inviterAddress) || !string(value.expiresAt)) throw new BackendValidationError("The backend returned an invalid party invite.");
+  return value as unknown as PartyInvite;
+}
+export async function getCurrentParty(): Promise<{ party: PartyRecord | null }> {
+  const payload = await request<unknown>("/parties/current");
+  if (!object(payload) || !(payload.party === null || object(payload.party))) throw new BackendValidationError("The backend returned an invalid current-party response.");
+  return { party: payload.party === null ? null : validateParty(payload.party) };
 }
 export function createParty(): Promise<{ party: PartyRecord }> {
   return request("/parties", { method: "POST" });
@@ -279,7 +299,10 @@ export function createPartyInvite(
   });
 }
 export function getPartyInvites(): Promise<{ invites: PartyInvite[] }> {
-  return request("/party-invites");
+  return request<unknown>("/party-invites").then((payload) => {
+    if (!object(payload) || !Array.isArray(payload.invites)) throw new BackendValidationError("The backend returned an invalid party-invite response.");
+    return { invites: payload.invites.map(validateInvite) };
+  });
 }
 export function respondPartyInvite(
   id: string,
@@ -290,8 +313,14 @@ export function respondPartyInvite(
     body: { accept },
   });
 }
-export function preparePartyEntry(id: string): Promise<{ partyId: string; members: readonly { address: string; character: { contractId: string; tokenId: string } }[] }> {
-  return request(`/parties/${encodeURIComponent(id)}/prepare-entry`, { method: "POST" });
+export async function preparePartyEntry(id: string): Promise<{ partyId: string; members: readonly { address: string; character: { contractId: string; tokenId: string } }[] }> {
+  const payload = await request<unknown>(`/parties/${encodeURIComponent(id)}/prepare-entry`, { method: "POST" });
+  if (!object(payload) || !string(payload.partyId) || !Array.isArray(payload.members)) throw new BackendValidationError("The backend returned an invalid party-entry response.");
+  const members = payload.members.map((member) => {
+    if (!object(member) || !string(member.address) || !object(member.character) || !string(member.character.contractId) || !string(member.character.tokenId)) throw new BackendValidationError("The backend returned an invalid prepared party member.");
+    return { address: member.address, character: { contractId: member.character.contractId, tokenId: member.character.tokenId } };
+  });
+  return { partyId: payload.partyId, members };
 }
 
 export function getNotificationUnreadCount(
