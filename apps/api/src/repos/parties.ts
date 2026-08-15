@@ -28,7 +28,7 @@ export type InviteStatus = 'pending' | 'accepted' | 'declined' | 'expired';
 export interface PartyInvite { readonly id: string; readonly partyId: string; readonly inviterAddress: string; readonly inviteeAddress: string; readonly status: InviteStatus; readonly createdAt: Date; readonly expiresAt: Date; readonly respondedAt: Date | null; }
 export type CreateInviteResult = { readonly kind: 'created' | 'existing'; readonly invite: PartyInvite } | { readonly kind: 'not_leader' | 'already_member' | 'self' | 'party_full' };
 export type RespondInviteResult = 'accepted' | 'declined' | 'not_found' | 'expired' | 'party_full' | 'already_member';
-export type PartyMutationResult = 'updated' | 'not_member' | 'forbidden' | 'invalid_target';
+export type PartyMutationResult = 'updated' | 'not_member' | 'forbidden' | 'invalid_target' | 'character_required';
 
 export interface PartyStore {
   create(address: string): Promise<CreatePartyResult>;
@@ -218,7 +218,7 @@ export class PostgresPartyStore implements PartyStore {
   }
 
   async setReady(partyId: string, address: string, ready: boolean): Promise<PartyMutationResult> {
-    const result = await query<{ outcome: PartyMutationResult }>(`update party_members set ready=$3 where party_id=$1 and address=$2 returning 'updated'::text as outcome`, [partyId, address, ready]);
+    const result = await query<{ outcome: PartyMutationResult }>(`with member as (select nft_contract_id from party_members where party_id=$1 and address=$2), updated as (update party_members set ready=$3 where party_id=$1 and address=$2 and (not $3 or nft_contract_id is not null) returning address) select case when not exists(select 1 from member) then 'not_member' when $3 and (select nft_contract_id is null from member) then 'character_required' when exists(select 1 from updated) then 'updated' else 'not_member' end as outcome`, [partyId, address, ready]);
     return result.rows[0]?.outcome ?? 'not_member';
   }
 
@@ -306,7 +306,9 @@ export class MemoryPartyStore implements PartyStore {
 
   async setReady(partyId: string, address: string, ready: boolean): Promise<PartyMutationResult> {
     const party = this.parties.get(partyId);
-    if (!party || !party.members.some((member) => member.address === address)) return 'not_member';
+    const member = party?.members.find((candidate) => candidate.address === address);
+    if (!party || !member) return 'not_member';
+    if (ready && !member.nftContractId) return 'character_required';
     this.parties.set(partyId, { ...party, members: party.members.map((member) => member.address === address ? { ...member, ready } : member) });
     return 'updated';
   }

@@ -95,7 +95,7 @@ describe('party routes', () => {
     const partyId = created.json().party.id;
     const invite = await app.inject({ method: 'POST', url: `/parties/${partyId}/invites`, headers: auth(ALICE), payload: { address: BOB } });
     await app.inject({ method: 'POST', url: `/party-invites/${invite.json().invite.id}/respond`, headers: auth(BOB), payload: { accept: true } });
-    expect((await app.inject({ method: 'POST', url: `/parties/${partyId}/ready`, headers: auth(BOB), payload: { ready: true } })).json()).toEqual({ ready: true });
+    expect((await app.inject({ method: 'POST', url: `/parties/${partyId}/ready`, headers: auth(BOB), payload: { ready: true } })).statusCode).toBe(409);
     expect((await app.inject({ method: 'POST', url: `/parties/${partyId}/kick`, headers: auth(BOB), payload: { address: ALICE } })).statusCode).toBe(403);
     expect((await app.inject({ method: 'POST', url: `/parties/${partyId}/kick`, headers: auth(ALICE), payload: { address: BOB } })).json()).toEqual({ kicked: BOB });
     expect((await notifications.list(BOB, 10)).some((row) => row.type === 'party_kicked')).toBe(true);
@@ -109,5 +109,12 @@ describe('party routes', () => {
     expect(selected.json()).toEqual({ character: { contractId: 'SPTEST.character', tokenId: '7' }, ready: false });
     expect((await store.current(ALICE))?.members[0]).toMatchObject({ nftContractId: 'SPTEST.character', nftTokenId: '7', ready: false });
     expect((await app.inject({ method: 'POST', url: `/parties/${partyId}/character`, headers: auth(ALICE), payload: { contractId: 'SPTEST.character', tokenId: 8 } })).statusCode).toBe(400);
+  });
+
+  it('refuses readiness until the member has selected a character', async () => {
+    const created = await app.inject({ method: 'POST', url: '/parties', headers: auth(ALICE) });
+    const response = await app.inject({ method: 'POST', url: `/parties/${created.json().party.id}/ready`, headers: auth(ALICE), payload: { ready: true } });
+    expect(response.statusCode).toBe(409);
+    expect((await store.current(ALICE))?.members[0].ready).toBe(false);
   });
 });

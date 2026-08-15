@@ -69,6 +69,7 @@ export async function registerPartyRoutes(app: FastifyInstance, deps: { parties:
     if (typeof ready !== 'boolean') throw badRequest('READY_REQUIRED', 'The ready field must be a boolean.');
     const outcome = await deps.parties.setReady(id, sub, ready);
     if (outcome === 'not_member') throw notFound('PARTY_NOT_FOUND', 'Party or member not found.');
+    if (outcome === 'character_required') throw conflict('PARTY_CHARACTER_REQUIRED', 'Select a character before marking yourself ready.');
     return { ready };
   });
 
