@@ -50,11 +50,34 @@ create table if not exists parties (
 create table if not exists party_members (
   party_id uuid references parties(id) on delete cascade,
   address text not null,
-  nft_contract_id text not null,
-  nft_token_id bigint not null,
+  nft_contract_id text,
+  nft_token_id bigint,
+  role text not null default 'member' check (role in ('leader','member')),
+  ready boolean not null default false,
   joined_at timestamptz not null default now(),
-  primary key (party_id, address)
+  primary key (party_id, address),
+  check ((nft_contract_id is null) = (nft_token_id is null))
 );
+
+-- A wallet may only participate in one active party. The partial unique index
+-- guarantees one leader while still allowing the other three member slots.
+alter table party_members alter column nft_contract_id drop not null;
+alter table party_members alter column nft_token_id drop not null;
+alter table party_members add column if not exists role text not null default 'member';
+alter table party_members add column if not exists ready boolean not null default false;
+do $$ begin
+  alter table party_members add constraint party_members_role_check
+    check (role in ('leader','member'));
+exception when duplicate_object then null;
+end $$;
+do $$ begin
+  alter table party_members add constraint party_members_character_pair_check
+    check ((nft_contract_id is null) = (nft_token_id is null));
+exception when duplicate_object then null;
+end $$;
+create unique index if not exists party_members_address_idx on party_members (address);
+create unique index if not exists party_members_one_leader_idx
+  on party_members (party_id) where role = 'leader';
 
 -- Free dungeon spawns on the world map (off-chain content, no gate fee).
 create table if not exists dungeon_spawns (

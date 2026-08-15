@@ -93,6 +93,8 @@ import { registerPaidClaimRoutes } from './routes/paidDungeonClaim.js';
 import { registerRunRoutes } from './routes/runs.js';
 import { registerNotificationRoutes } from './routes/notifications.js';
 import { MemoryNotificationStore, PostgresNotificationStore, type NotificationStore } from './repos/notifications.js';
+import { MemoryPartyStore, PostgresPartyStore, type PartyStore } from './repos/parties.js';
+import { registerPartyRoutes } from './routes/parties.js';
 import { DEFAULT_RATE_LIMIT_RULES, MemoryRateLimiter } from './lib/rateLimit.js';
 
 export interface ServerDeps {
@@ -113,6 +115,7 @@ export interface ServerDeps {
   readonly jobLeaseStore?: JobLeaseStore;
   readonly forgeHistoryStore?: ForgeHistoryStore;
   readonly playerStatsStore?: PlayerStatsStore;
+  readonly partyStore?: PartyStore;
   /**
    * The oracle's signing capability. Injected in tests so the combat loop can be
    * exercised without a real key on disk; loaded from `ORACLE_PRIVATE_KEY`
@@ -290,6 +293,7 @@ export async function buildServer(deps: ServerDeps = {}): Promise<FastifyInstanc
           () => (runStore instanceof MemoryRunStore ? runStore.all() : []),
           forgeHistoryStore,
         ));
+  const partyStore = deps.partyStore ?? (config.databaseUrl ? new PostgresPartyStore() : new MemoryPartyStore());
 
   const jwtSecret = deps.jwtSecret ?? config.jwtSecret;
   if (!jwtSecret) {
@@ -437,6 +441,7 @@ export async function buildServer(deps: ServerDeps = {}): Promise<FastifyInstanc
   await registerLeaderboardRoutes(app, { playerStats: playerStatsStore, identity });
   await registerProfileRoutes(app, { chain, playerStats: playerStatsStore, jwtSecret, identity });
   await registerNotificationRoutes(app, { notifications: notificationStore, jwtSecret });
+  await registerPartyRoutes(app, { parties: partyStore, jwtSecret });
 
   await registerDungeonRoutes(app, {
     spawns: spawnStore,
