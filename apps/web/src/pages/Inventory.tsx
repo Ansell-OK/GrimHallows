@@ -6,11 +6,18 @@
  * chain fact, and an item that has been sold, or burned in the forge, must stop
  * appearing immediately.
  *
- * WHAT AN ITEM DOES COMES FROM ITS ON-CHAIN TIER. The bonus text on every card
- * is derived from `tier` — read from `get-token-tier` — by the same shared table
- * the combat resolver uses. The metadata URI is displayed as a link and is never
- * read for a number (01-game-design.md#6): rewriting a JSON file must not change
- * a single die, and the only way to guarantee that is to never consult one.
+ * WHAT AN ITEM DOES COMES FROM ITS ON-CHAIN TIER AND ARCHETYPE. Both halves are
+ * chain facts: the tier from `get-token-tier`, the archetype parsed out of the
+ * uri STRING `get-token-uri` returns — a string written once inside `mint`, with
+ * no setter, immutable for the life of the token. The bonus text on every card is
+ * `archetypeBonusVector(archetype, tier)`, the same table the combat resolver
+ * uses.
+ *
+ * The document that uri points at is still never fetched (01-game-design.md#6):
+ * rewriting a JSON file must not change a single die, and the only way to
+ * guarantee that is to never consult one. Art and names come from the bundle,
+ * keyed by the parsed archetype — so re-pinning metadata can change what a wallet
+ * displays and still cannot move a stat here.
  *
  * There is no Equip button here and no Discard. Equipping is a decision made at
  * the mouth of a dungeon, not in a bag: the chosen set is frozen into that run's
@@ -23,6 +30,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { TopBar } from '@/components/layout/TopBar';
 import { Button } from '@/components/ui/Button';
+import imgLoot from '@/assets/images/reward_shadowbound_mantle_1785808903796.jpg';
 import {
   errorMessage,
   explorerAddressLink,
@@ -31,7 +39,9 @@ import {
   type ConfigResponse,
   type EquippablePowerUp,
 } from '@/lib/api';
+import { lootArtFor } from '@/lib/lootArt';
 import { loadActiveCharacter } from '@/lib/session';
+import { tierAccent, tierDot } from '@/lib/tierStyle';
 import { useWallet } from '@/lib/wallet';
 import { MAX_POWER_UP_TIER, powerUpBonus } from '@grimhallow/shared';
 
@@ -40,20 +50,6 @@ const TIER_FILTERS: readonly (number | 'all')[] = [
   'all',
   ...Array.from({ length: MAX_POWER_UP_TIER }, (_, i) => i + 1),
 ];
-
-function tierAccent(tier: number): string {
-  if (tier >= 4) return 'text-gold';
-  if (tier === 3) return 'text-blood';
-  if (tier === 2) return 'text-void';
-  return 'text-blue-400';
-}
-
-function tierDot(tier: number): string {
-  if (tier >= 4) return 'bg-gold';
-  if (tier === 3) return 'bg-blood';
-  if (tier === 2) return 'bg-void';
-  return 'bg-blue-400';
-}
 
 export default function Inventory() {
   const navigate = useNavigate();
@@ -201,19 +197,12 @@ export default function Inventory() {
             ) : (
               <div className="grid grid-cols-5 gap-4 content-start">
                 {filtered.map((item) => (
-                  <button
+                  <ItemCard
                     key={item.tokenId}
-                    onClick={() => setSelectedId(item.tokenId)}
-                    className={`aspect-square border cursor-pointer hover:border-void transition-colors p-2 flex flex-col items-center justify-center relative overflow-hidden bg-stone/30 ${
-                      selected?.tokenId === item.tokenId ? 'border-void' : 'border-stone'
-                    }`}
-                  >
-                    <div className={`font-display text-lg ${tierAccent(item.tier)}`}>
-                      T{item.tier}
-                    </div>
-                    <div className="font-ui text-[10px] text-gray-500 mt-1">#{item.tokenId}</div>
-                    <div className={`absolute top-0 right-0 w-2 h-2 ${tierDot(item.tier)}`} />
-                  </button>
+                    item={item}
+                    selected={selected?.tokenId === item.tokenId}
+                    onSelect={() => setSelectedId(item.tokenId)}
+                  />
                 ))}
               </div>
             )}
@@ -239,6 +228,45 @@ export default function Inventory() {
   );
 }
 
+/**
+ * One item in the grid.
+ *
+ * The art is `lootArtFor(archetype, tier)`, falling back to the generic loot
+ * picture — which is what `relic` deliberately keeps, so a token minted before
+ * archetypes looks in the bag exactly as it did before this shipped. The tier
+ * glyph stays on top of the art rather than being replaced by it: tier is the
+ * number that decides what the item is worth in the forge, and a player
+ * scanning a full bag for three of a kind should not have to recognise twelve
+ * silhouettes to find them.
+ */
+function ItemCard({
+  item,
+  selected,
+  onSelect,
+}: {
+  item: EquippablePowerUp;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const art = lootArtFor(item.archetype, item.tier) ?? imgLoot;
+  return (
+    <button
+      onClick={onSelect}
+      title={item.name}
+      className={`aspect-square border cursor-pointer hover:border-void transition-colors flex flex-col items-center justify-center relative overflow-hidden bg-stone/30 ${
+        selected ? 'border-void' : 'border-stone'
+      }`}
+    >
+      <img src={art} alt="" className="absolute inset-0 w-full h-full object-cover opacity-40" />
+      <div className="relative flex flex-col items-center">
+        <div className={`font-display text-lg ${tierAccent(item.tier)}`}>T{item.tier}</div>
+        <div className="font-ui text-[10px] text-gray-500 mt-1">#{item.tokenId}</div>
+      </div>
+      <div className={`absolute top-0 right-0 w-2 h-2 ${tierDot(item.tier)}`} />
+    </button>
+  );
+}
+
 function ItemDetail({
   item,
   explorerHref,
@@ -248,24 +276,35 @@ function ItemDetail({
   explorerHref: string | null;
   onForge: () => void;
 }) {
+  const art = lootArtFor(item.archetype, item.tier);
   return (
     <>
-      <div className="w-full aspect-square bg-stone/20 border border-stone mb-6 flex flex-col items-center justify-center p-4">
-        <div className={`font-display text-5xl ${tierAccent(item.tier)}`}>T{item.tier}</div>
-        <div className="font-ui text-[10px] text-gray-500 tracking-widest mt-2 uppercase">
-          {item.tierName}
+      <div className="w-full aspect-square bg-stone/20 border border-stone mb-6 flex flex-col items-center justify-center p-4 relative overflow-hidden">
+        <img
+          src={art ?? imgLoot}
+          alt=""
+          className={`absolute inset-0 w-full h-full object-cover ${art ? 'opacity-70' : 'opacity-30'}`}
+        />
+        <div className="relative flex flex-col items-center">
+          <div className={`font-display text-5xl ${tierAccent(item.tier)}`}>T{item.tier}</div>
+          <div className="font-ui text-[10px] text-gray-400 tracking-widest mt-2 uppercase">
+            {item.tierName}
+          </div>
         </div>
       </div>
 
       <div
         className={`text-xs font-ui uppercase tracking-widest mb-1 ${tierAccent(item.tier)}`}
       >
-        {item.tierName} Power-Up
+        {item.tierName}
       </div>
-      <h3 className="text-xl font-display text-gray-200 mb-4">Token #{item.tokenId}</h3>
+      {/* The item's own name, from `lootDisplayName(archetype, tier, tokenId)` on
+          the server. Not composed here: a name is a function of the same two
+          chain facts the stats are, and deriving it twice invites two answers. */}
+      <h3 className="text-xl font-display text-gray-200 mb-4">{item.name}</h3>
 
-      {/* Everything in this block is derived from the on-chain tier, not from
-          the metadata URI below it. */}
+      {/* Everything in this block is derived from the on-chain tier and
+          archetype, not from the document the metadata URI points at. */}
       <div className="space-y-2 font-ui text-sm mb-4 border-b border-stone pb-4">
         <p className="text-gray-300 leading-relaxed">{item.summary}</p>
         {item.diceFormulaBonus && (
@@ -280,6 +319,12 @@ function ItemDetail({
             <span className="text-gray-200">+{item.defenseBonus}</span>
           </div>
         )}
+        {item.maxHpBonus > 0 && (
+          <div className="flex justify-between text-xs">
+            <span className="text-gray-500">Max HP</span>
+            <span className="text-gray-200">+{item.maxHpBonus}</span>
+          </div>
+        )}
       </div>
 
       <div className="space-y-2 font-ui text-[10px] text-gray-500 mb-6">
@@ -288,15 +333,20 @@ function ItemDetail({
           <span className="text-gray-400">{item.tier}</span>
         </div>
         <div className="flex justify-between">
+          <span>Archetype</span>
+          <span className="text-gray-400 capitalize">{item.archetype}</span>
+        </div>
+        <div className="flex justify-between">
           <span>Source</span>
           <span className="text-gray-400">
             {item.mintedVia === 'forge' ? 'Forged' : 'Dungeon reward'}
           </span>
         </div>
-        {/* Shown as a link, never read for a stat. */}
+        {/* The archetype above was parsed from this string. The document it
+            addresses is never fetched — see this file's header. */}
         {item.metadataUri && (
           <div className="pt-2 border-t border-stone/50">
-            <span className="block mb-1">Metadata (flavour only)</span>
+            <span className="block mb-1">Metadata</span>
             <span className="text-gray-600 break-all">{item.metadataUri}</span>
           </div>
         )}

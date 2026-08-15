@@ -37,7 +37,9 @@ import type {
   EncounterSetup,
   RewardKind,
   RunState,
+  StoredEncounterSetup,
 } from '@grimhallow/shared';
+import { normalizeStoredSetup } from '@grimhallow/shared';
 import { query } from '../db.js';
 
 export type { CharacterRef };
@@ -56,13 +58,36 @@ export interface RunRecord {
   readonly state: RunState;
   readonly seedHash: string | null;
   /**
-   * The encounter's inputs, frozen at commit time.
+   * The encounter's inputs, frozen at commit time, in the shape the engine takes.
    *
    * Null before commit. Pinned rather than recomputed because derived stats
    * depend on NFT metadata, which lives on somebody else's server and can change
    * mid-run — recomputing would replay a different fight from the one played.
+   *
+   * This is the NORMALIZED form: `storedSetup` below is what the column holds,
+   * and this is that value put through `normalizeStoredSetup`. Hand this one to
+   * `runEncounter` and nothing else.
    */
   readonly setup: EncounterSetup | null;
+  /**
+   * The same setup in the exact shape the column holds it.
+   *
+   * Non-null exactly when `setup` is — they are two readings of one value, not
+   * two values. For every run committed since archetypes landed they are the
+   * same bytes; for a run committed before, this one still carries
+   * `powerUpTiers` and `setup` carries the `powerUpItems` it normalizes to.
+   *
+   * IT EXISTS BECAUSE THE ORACLE SIGNED THESE BYTES AND NOT THE OTHER ONES. The
+   * transcript hash inside a free run's `resolve_signature` is
+   * `sha256(canonicalize({actions, setup}))` over whatever the row held at the
+   * time it was signed. Hashing the normalized form instead would recompute a
+   * different fingerprint on every read than the signature we published
+   * alongside it embeds — a run whose own two published values disagree, which
+   * reads exactly like a backend caught rewriting history. So the hash and
+   * `VerificationData.setup` both come from here, and only the replay comes
+   * from `setup`.
+   */
+  readonly storedSetup: StoredEncounterSetup | null;
   /** Null until the run resolves. See `oracle/seed.ts` for why. */
   readonly seedReveal: string | null;
   readonly combatOutcome: CombatOutcome | null;
@@ -451,7 +476,7 @@ interface RunRow {
   character_token_id: string | null;
   state: RunState;
   seed_hash: string | null;
-  encounter_setup_json: EncounterSetup | null;
+  encounter_setup_json: StoredEncounterSetup | null;
   seed_reveal: string | null;
   combat_outcome: CombatOutcome | null;
   fee_paid_ustx: string | null;
@@ -487,6 +512,18 @@ const RUN_COLUMNS = `id, dungeon_type, dungeon_id, spawn_id, party_id, created_b
    loot_mint_commit_tx_id, loot_mint_resolve_tx_id, loot_mint_failed_reason,
    created_at, committed_at, resolved_at`;
 
+/*
+ * `StoredPartyMember`, `StoredSetup` and `normalizeSetup` used to live here and
+ * are now `StoredPartyMemberSetup`, `StoredEncounterSetup` and
+ * `normalizeStoredSetup` in `shared`.
+ *
+ * They moved because the stored shape stopped being a private detail of this
+ * repo the moment `VerificationData.setup` began publishing it. An outside
+ * verifier is handed these bytes — they are what the transcript hash covers —
+ * so the declared way of turning them into something `runEncounter` accepts has
+ * to be in the package they already have, not in a backend they cannot read.
+ */
+
 function fromRow(row: RunRow): RunRecord {
   return {
     // bigint comes back from pg as a string, and it stays a string all the way
@@ -510,7 +547,8 @@ function fromRow(row: RunRow): RunRecord {
         : null,
     state: row.state,
     seedHash: row.seed_hash,
-    setup: row.encounter_setup_json,
+    setup: normalizeStoredSetup(row.encounter_setup_json),
+    storedSetup: row.encounter_setup_json,
     seedReveal: row.seed_reveal,
     combatOutcome: row.combat_outcome,
     // Kept as a string for the same reason as `id`: it is money, and money that
@@ -940,6 +978,7 @@ export class MemoryRunStore implements RunStore {
       state: 'pending',
       seedHash: null,
       setup: null,
+      storedSetup: null,
       seedReveal: null,
       combatOutcome: null,
       feePaidUstx: null,
@@ -980,6 +1019,7 @@ export class MemoryRunStore implements RunStore {
       state: 'pending',
       seedHash: null,
       setup: null,
+      storedSetup: null,
       seedReveal: null,
       combatOutcome: null,
       feePaidUstx: run.feePaidUstx,
@@ -1019,7 +1059,15 @@ export class MemoryRunStore implements RunStore {
       ...existing,
       state: 'committed',
       seedHash: details.seedHash,
-      setup: details.setup,
+      // Split the same two ways `fromRow` splits a row, rather than storing one
+      // object under both names. `CommitDetails.setup` is today's shape, so the
+      // normalization is a no-op here and the split looks pointless — until a
+      // test hands this store a pre-archetype setup to reproduce a legacy row,
+      // which is the only way that case can be exercised without a database. If
+      // this store skipped the split there, it would hold a `setup` no replay
+      // can run and the two stores would disagree about what storage means.
+      setup: normalizeStoredSetup(details.setup),
+      storedSetup: details.setup,
       commitSignature: details.commitSignature,
       oracleAddress: details.oracleAddress,
       commitTxId: details.commitTxId ?? null,

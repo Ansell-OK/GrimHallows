@@ -16,9 +16,11 @@ import type { FastifyInstance } from 'fastify';
 import { Cl, ClarityType } from '@stacks/transactions';
 import {
   CONTRACT_NAMES,
+  type LootArchetype,
   MAX_EQUIPPED_POWER_UPS,
   PAID_DUNGEON_ID,
   getNetworkConfig,
+  lootFileStem,
 } from '@grimhallow/shared';
 import { buildServer } from '../src/server.js';
 import { MemoryRunStore } from '../src/repos/runs.js';
@@ -39,6 +41,19 @@ import {
 const JWT_SECRET = 'test-jwt-secret';
 const PLAYER = 'ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM';
 const LOOT_CONTRACT = `${getNetworkConfig('devnet').deployer}.${CONTRACT_NAMES.characterLootNft}`;
+
+/**
+ * A loot URI shaped exactly as a minted one, built without `lootUriFor`.
+ *
+ * `lootUriFor` throws while `LOOT_METADATA_CID` is unset (Phase 3 has not
+ * pinned), and these tests are about the route reading a uri off chain, not
+ * about which CID we mint against. The stem comes from `lootFileStem` so the
+ * part that actually has to round-trip through `parseLootUri` is the shared
+ * one — a stem change breaks these tests rather than sliding past them.
+ */
+const CID = 'bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi';
+const uriFor = (slug: LootArchetype, tier: number): string =>
+  `ipfs://${CID}/${lootFileStem(slug, tier)}.json`;
 
 describe('POST /dungeons/:id/enter', () => {
   let app: FastifyInstance;
@@ -363,12 +378,24 @@ describe('POST /dungeons/:id/enter', () => {
     const enterWith = (tokenIds: unknown) =>
       enter(spawn.id, { body: { character: CHARACTER, powerUpTokenIds: tokenIds } });
 
-    /** Give the wallet these `(tokenId, tier)` loot NFTs, and nothing else. */
-    const holding = (tokenId: string, tier: number) => ({ tokenId, tier });
+    /**
+     * Give the wallet these loot NFTs, and nothing else.
+     *
+     * An archetype is part of a holding because it is part of the item: since
+     * archetypes, `get-token-tier` alone does not describe a token, and a stub
+     * that answered only that would let every assertion below pass against
+     * `relic` — the parser's safe default — while proving nothing about the half
+     * of an item that picks which stat it raises.
+     */
+    const holding = (tokenId: string, tier: number, archetype: LootArchetype = 'sword') => ({
+      tokenId,
+      tier,
+      archetype,
+    });
 
-    const withLoot = async (...owned: { tokenId: string; tier: number }[]) => {
+    const withLoot = async (...owned: ReturnType<typeof holding>[]) => {
       await app.close();
-      const tiers = new Map(owned.map((o) => [o.tokenId, o.tier]));
+      const held = new Map(owned.map((o) => [o.tokenId, o]));
       app = await buildServer({
         chain: stubChain({
           getNftHoldings: async () =>
@@ -381,13 +408,22 @@ describe('POST /dungeons/:id/enter', () => {
               txId: '0xabc',
             })),
           callReadOnly: async (params) => {
-            if (params.functionName === 'get-token-tier') {
+            const isTier = params.functionName === 'get-token-tier';
+            const isUri = params.functionName === 'get-token-uri';
+            if (isTier || isUri) {
               const hex = params.functionArgsHex?.[0];
               if (!hex) throw new Error('expected a token id argument');
               const cv = Cl.deserialize(hex);
               if (cv.type !== ClarityType.UInt) throw new Error('expected a uint');
-              const tier = tiers.get(String(cv.value));
-              return tier === undefined ? Cl.none() : Cl.some(Cl.uint(tier));
+              const item = held.get(String(cv.value));
+              if (isTier) {
+                return item === undefined ? Cl.none() : Cl.some(Cl.uint(item.tier));
+              }
+              // `get-token-uri` is `(response (optional (string-ascii 256)) uint)`,
+              // so an unknown token is `(ok none)` rather than a bare `none`.
+              return item === undefined
+                ? Cl.ok(Cl.none())
+                : Cl.ok(Cl.some(Cl.stringAscii(uriFor(item.archetype, item.tier))));
             }
             return gameCore.callReadOnly(params);
           },
@@ -406,29 +442,39 @@ describe('POST /dungeons/:id/enter', () => {
       // every run before the player owns their first drop looks like this.
       const res = await enter(spawn.id);
       expect(res.statusCode).toBe(200);
-      expect(runs.all()[0].setup?.party[0].powerUpTiers).toEqual([]);
+      expect(runs.all()[0].setup?.party[0].powerUpItems).toEqual([]);
     });
 
-    it('freezes the equipped tiers into the committed setup', async () => {
+    it('freezes the equipped items into the committed setup', async () => {
       // The setup is what `VerificationData` publishes, so this is what makes an
-      // upgraded damage roll recomputable by a skeptical player. Tiers stored
+      // upgraded damage roll recomputable by a skeptical player. Items stored
       // anywhere else would leave the published record unable to explain its own
       // dice.
-      await withLoot(holding('7', 4), holding('8', 1));
+      //
+      // Both halves are asserted because both halves pick the dice: a tier-4
+      // sword and a tier-4 chestplate cost the same budget and roll completely
+      // differently. Storing the tier and losing the archetype would reproduce
+      // neither.
+      await withLoot(holding('7', 4, 'chestplate'), holding('8', 1, 'boots'));
 
       const res = await enterWith(['7', '8']);
       expect(res.statusCode).toBe(200);
-      // Ascending, so the stored list is a function of the set chosen rather
-      // than of the order the request happened to list it in.
-      expect(runs.all()[0].setup?.party[0].powerUpTiers).toEqual([1, 4]);
+      // Tier ascending then archetype, so the stored list is a function of the
+      // set chosen rather than of the order the request happened to list it in.
+      expect(runs.all()[0].setup?.party[0].powerUpItems).toEqual([
+        { archetype: 'boots', tier: 1 },
+        { archetype: 'chestplate', tier: 4 },
+      ]);
     });
 
-    it('takes the tier from chain, not from anything the client says', async () => {
+    it('takes the item from chain, not from anything the client says', async () => {
       // The anti-spoofing assertion. The body names token 8, which is tier 1 on
-      // chain; a legendary in the request body must not make it a legendary.
+      // chain; a legendary in the request body must not make it a legendary. The
+      // same holds for archetype now that it is the other half of an item — and
+      // it is enforced identically, by the request carrying ids and nothing else.
       await withLoot(holding('8', 1));
 
-      const res = await enterWith([{ tokenId: '8', tier: 4 }]);
+      const res = await enterWith([{ tokenId: '8', tier: 4, archetype: 'warhammer' }]);
       // Rejected outright: the shape check only accepts ids, so an object
       // carrying a tier is not a token id at all.
       expect(res.statusCode).toBe(400);
@@ -488,7 +534,9 @@ describe('POST /dungeons/:id/enter', () => {
 
       const res = await enterWith([7]);
       expect(res.statusCode).toBe(200);
-      expect(runs.all()[0].setup?.party[0].powerUpTiers).toEqual([3]);
+      expect(runs.all()[0].setup?.party[0].powerUpItems).toEqual([
+        { archetype: 'sword', tier: 3 },
+      ]);
     });
 
     it('makes the equipped run actually roll bigger damage', async () => {

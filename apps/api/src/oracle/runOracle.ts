@@ -71,6 +71,11 @@ export interface RunView {
   /**
    * Fingerprint of `(setup, actions)` — the non-seed half of what was signed.
    *
+   * The setup here is `run.storedSetup`, the row's own bytes, not the
+   * normalized `run.setup` the replay above ran on. For everything committed
+   * since archetypes landed those are the same bytes; for older rows they are
+   * not, and the signature already in the database was taken over the row's.
+   *
    * Computed here rather than by the caller so that the value published for
    * verification and the value inside the resolve statement come from one line
    * of code. Two implementations of "what was signed" is one too many.
@@ -210,7 +215,16 @@ export class RunOracle {
       turns,
       encounter: view,
       actions,
-      transcriptHash: transcriptHash(run.setup, actions),
+      // Over the setup AS STORED, not as replayed. These are the same bytes for
+      // every run committed since archetypes landed; for one committed before,
+      // the row still says `powerUpTiers` and `run.setup` says `powerUpItems`.
+      // The oracle signed the row's bytes at resolve time, so hashing the
+      // normalized form here would recompute a fingerprint that disagrees with
+      // the signature stored beside it — on every read, forever, for runs that
+      // were settled honestly. `run.setup` is the fallback only to satisfy the
+      // compiler: the two are null together, and the guard above has already
+      // refused a run with neither.
+      transcriptHash: transcriptHash(run.storedSetup ?? run.setup, actions),
     };
   }
 

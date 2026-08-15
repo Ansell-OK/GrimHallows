@@ -51,7 +51,7 @@ const SETUP: EncounterSetup = {
       name: 'Character #7',
       charClass: 'warrior',
       stats: { hp: 30, str: 14, agi: 11, int: 8, vit: 12 },
-      powerUpTiers: [],
+      powerUpItems: [],
     },
   ],
 };

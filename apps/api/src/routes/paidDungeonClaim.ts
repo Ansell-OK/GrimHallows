@@ -109,7 +109,7 @@ export async function registerPaidClaimRoutes(
     // committing a run with a loadout the player did not choose. An already-paid
     // entry is not lost by this: the claim is idempotent, so correcting the
     // loadout and retrying reaches the same run.
-    const powerUpTiers = await resolveLoadout(
+    const powerUpItems = await resolveLoadout(
       deps.powerUps,
       session.sub,
       body.powerUpTokenIds,
@@ -121,7 +121,7 @@ export async function registerPaidClaimRoutes(
       enterTxId,
       claimedBy: session.sub,
       character,
-      powerUpTiers,
+      powerUpItems,
     });
 
     if (run.dungeonId !== dungeonId) {

@@ -7,7 +7,8 @@
  * Nothing is computed here and nothing is assumed.
  *
  * This screen replaced a design mock whose numbers were invented, so it is worth
- * naming the four claims that mock made and this one will not:
+ * naming the four claims that mock made — three this screen will not make, and
+ * one that has since become true and is now made on different terms:
  *
  *   - **"Pool was N STX."** The sponsor-pool balance at the moment a run resolved
  *     is not recorded on the run — the oracle reads it live to decide whether a
@@ -18,8 +19,15 @@
  *     and only on a win — `player_stats` aggregates `combat_outcome = 'win'`
  *     rows only. The points shown come from `SCORE_WEIGHTS`, the same table the
  *     leaderboard scores with.
- *   - **A named item.** Loot is a tier, not a catalogue entry. The art below is
- *     decoration chosen by nothing; the tier and its metadata URI are the facts.
+ *   - **A named item with its own art.** This one the mock was right about, and
+ *     it is true now: the card is titled `Legendary Chestplate`, bordered in the
+ *     tier's colour and pictured from the archetype. What makes it honest rather
+ *     than invented is the direction — both the name and the picture are chosen
+ *     FROM the (archetype, tier) pair, and no stat is ever chosen from either.
+ *     The archetype is parsed out of the `lootUri` STRING the resolve recorded;
+ *     the document that string addresses is never fetched. A drop that predates
+ *     archetypes parses to `relic` and reads `Mythic Relic` over the old generic
+ *     picture — which is exactly what it was.
  *   - **"Rewards have been sent to your wallet."** True only for a win that
  *     drew something, and then only because a transaction says so — which is why
  *     that sentence is now attached to a txid rather than printed
@@ -37,6 +45,16 @@
  * which is a genuinely new state to render: an item that was really drawn and
  * really is not in the wallet yet. That interval is shown as itself rather than
  * papered over in either direction.
+ *
+ * SO THE JACKPOT CARD IS NOT MOUNTED ON A FREE RUN AT ALL. It used to be — dimmed,
+ * with a line explaining that the pool pays only for entries that paid a fee. That
+ * is a true sentence about a prize the player was never eligible for, which is a
+ * worse thing to show than nothing: it presents a fee-gated feature as a near-miss
+ * on a screen whose whole job is reporting what happened. `resolveFreeRunReward`
+ * takes no pool balance and cannot return `kind: 'jackpot'`, so on a free run the
+ * card describes a branch that is unreachable rather than one that missed. A free
+ * run therefore draws a two-card table, and the layout centres on the loot card
+ * instead of leaving a grey column where the jackpot would have been.
  */
 
 import React, { useEffect, useState } from 'react';
@@ -53,7 +71,9 @@ import {
 } from '@/lib/api';
 import { clearActiveRun, loadActiveRun, type ActiveRun } from '@/lib/session';
 import { drewRewardTable, rankCredit, settlementText } from '@/lib/settlement';
-import { formatStx, lootTierName, type RunResponse } from '@grimhallow/shared';
+import { lootArtFor } from '@/lib/lootArt';
+import { tierBorderAlways, tierName } from '@/lib/tierStyle';
+import { formatStx, lootDisplayName, parseLootUri, type RunResponse } from '@grimhallow/shared';
 import rewardBg from '@/assets/images/reward_bg_1785807973369.jpg';
 import imgLoot from '@/assets/images/reward_shadowbound_mantle_1785808903796.jpg';
 import imgChest from '@/assets/images/misc_chest_reward_1785809469861.jpg';
@@ -309,41 +329,51 @@ function TableDraw({
   const dim = (lit: boolean) =>
     lit ? '' : 'grayscale opacity-30';
 
+  // Named, bordered and pictured from the (archetype, tier) pair — the archetype
+  // parsed out of `lootUri`'s STRING, the tier taken from the row, never from the
+  // parse (`parseLootUri` returns a tier as a cross-check only, and authority is
+  // the resolve). The dim branch keeps the generic word: an empty draw has no
+  // item to name, and inventing one for a card that says "not this time" would
+  // be the mock's fabricated-item problem in a smaller font.
+  const drop =
+    kind === 'loot' && reward?.lootUri && reward.tier
+      ? { uri: reward.lootUri, tier: reward.tier, parsed: parseLootUri(reward.lootUri) }
+      : null;
+  const lootTitle = drop ? lootDisplayName(drop.parsed.slug, drop.tier) : 'Power-Up';
+  const lootBorder = drop ? tierBorderAlways(drop.tier) : 'border-void';
+
   return (
     <div className="flex space-x-8 items-center justify-center mb-12">
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: stage === 'settle' ? 1 : 0 }}
-        className={`w-64 h-96 border-2 border-gold/30 bg-stone/50 p-6 flex flex-col justify-between items-center text-center ${dim(
-          jackpotLit,
-        )}`}
-      >
-        <div className="text-xl font-display text-gold uppercase tracking-widest mt-4">
-          Jackpot
-        </div>
-        <div className="flex-1 flex items-center justify-center">
-          {kind === 'jackpot' && reward?.amountUstx ? (
-            <div className="text-4xl font-display text-stx-accent drop-shadow-[0_0_10px_rgba(33,212,184,0.5)]">
-              {formatStx(BigInt(reward.amountUstx))} <span className="text-2xl">STX</span>
-            </div>
-          ) : reward?.degraded ? (
-            <div className="text-sm font-ui text-gold/80 leading-relaxed">
-              Rolled — but the sponsor pool could not cover it when this run
-              resolved.
-            </div>
-          ) : free ? (
-            <div className="text-sm font-ui text-gray-400 leading-relaxed">
-              Not in play on a free run. The pool pays prizes for entries that paid
-              a fee.
-            </div>
-          ) : (
-            <div className="text-sm font-ui text-gray-400">Not this time.</div>
-          )}
-        </div>
-        <div className="text-sm font-ui text-gray-400 uppercase tracking-widest mb-4">
-          {kind === 'jackpot' ? 'Paid from the sponsor pool' : 'From the sponsor pool'}
-        </div>
-      </motion.div>
+      {!free && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: stage === 'settle' ? 1 : 0 }}
+          className={`w-64 h-96 border-2 border-gold/30 bg-stone/50 p-6 flex flex-col justify-between items-center text-center ${dim(
+            jackpotLit,
+          )}`}
+        >
+          <div className="text-xl font-display text-gold uppercase tracking-widest mt-4">
+            Jackpot
+          </div>
+          <div className="flex-1 flex items-center justify-center">
+            {kind === 'jackpot' && reward?.amountUstx ? (
+              <div className="text-4xl font-display text-stx-accent drop-shadow-[0_0_10px_rgba(33,212,184,0.5)]">
+                {formatStx(BigInt(reward.amountUstx))} <span className="text-2xl">STX</span>
+              </div>
+            ) : reward?.degraded ? (
+              <div className="text-sm font-ui text-gold/80 leading-relaxed">
+                Rolled — but the sponsor pool could not cover it when this run
+                resolved.
+              </div>
+            ) : (
+              <div className="text-sm font-ui text-gray-400">Not this time.</div>
+            )}
+          </div>
+          <div className="text-sm font-ui text-gray-400 uppercase tracking-widest mb-4">
+            {kind === 'jackpot' ? 'Paid from the sponsor pool' : 'From the sponsor pool'}
+          </div>
+        </motion.div>
+      )}
 
       <AnimatePresence>
         {stage === 'intro' && (
@@ -368,35 +398,38 @@ function TableDraw({
             initial={{ scale: 0, rotate: -10 }}
             animate={{ scale: 1, rotate: 0 }}
             transition={{ type: 'spring', stiffness: 100, damping: 20 }}
-            className={`w-80 h-[28rem] border-2 border-void bg-obsidian p-6 flex flex-col justify-between items-center text-center shadow-[0_0_50px_rgba(107,47,160,0.4)] relative z-20 ${dim(
+            className={`w-80 h-[28rem] border-2 ${lootBorder} bg-obsidian p-6 flex flex-col justify-between items-center text-center shadow-[0_0_50px_rgba(107,47,160,0.4)] relative z-20 ${dim(
               kind === 'loot',
             )}`}
           >
             <div className="absolute inset-0 bg-gradient-to-b from-void/20 via-transparent to-transparent pointer-events-none" />
 
             <div className="text-2xl font-display text-gray-200 uppercase tracking-widest mt-4">
-              Power-Up
+              {lootTitle}
             </div>
 
-            {/* Cosmetic. Loot is a tier, not a named item — this picture is the
-                same whichever tier dropped, and nothing reads a stat from it. */}
+            {/* The picture is now per (archetype, tier), keyed off the parsed
+                slug — but it is still COSMETIC, and the direction of the arrow
+                matters: art is chosen from the archetype, no stat is ever chosen
+                from the art. A drop whose archetype has no file yet, and every
+                legacy `relic`, keeps the generic picture. */}
             <div className="w-48 h-48 bg-void/20 border border-void/50 my-6 flex items-center justify-center relative overflow-hidden">
               <div className="absolute inset-0 bg-void/10 animate-pulse" />
               <img
-                src={imgLoot}
+                src={(drop && lootArtFor(drop.parsed.slug, drop.tier)) ?? imgLoot}
                 alt=""
                 className="w-full h-full object-cover relative z-10 p-2"
               />
             </div>
 
             <div>
-              {kind === 'loot' && reward?.tier ? (
+              {drop ? (
                 <>
                   <div className="text-xl font-display text-gray-200 mb-2">
-                    Tier {reward.tier} · {lootTierName(reward.tier)}
+                    Tier {drop.tier} · {tierName(drop.tier)}
                   </div>
                   <div className="text-[10px] font-ui text-gray-500 break-all mb-2">
-                    {reward.lootUri}
+                    {drop.uri}
                   </div>
                   {/* Only free runs get a line here, and only because only they
                       have a gap between the draw and the token existing. On a
@@ -412,30 +445,32 @@ function TableDraw({
         )}
       </AnimatePresence>
 
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: stage === 'settle' ? 1 : 0 }}
-        className={`w-64 h-96 border border-gray-600 bg-stone/50 p-6 flex flex-col items-center text-center justify-between ${dim(
-          kind === 'none',
-        )}`}
-      >
-        <div className="text-xl font-display text-gray-400 uppercase tracking-widest mt-4">
-          No Big Prize
-        </div>
-        <div className="flex-1 flex flex-col items-center justify-center text-gray-400 text-sm font-ui space-y-2">
-          {kind === 'none' ? (
-            <>
-              <p>The draw came up empty.</p>
-              <p>The run still counts toward your rank.</p>
-            </>
-          ) : (
-            <p>Not this time.</p>
-          )}
-        </div>
-        <div className="text-xs font-ui text-gray-500 uppercase tracking-widest mb-4">
-          Most runs land here
-        </div>
-      </motion.div>
+      {(!free || kind === 'none') && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: stage === 'settle' ? 1 : 0 }}
+          className={`w-64 h-96 border border-gray-600 bg-stone/50 p-6 flex flex-col items-center text-center justify-between ${dim(
+            kind === 'none',
+          )}`}
+        >
+          <div className="text-xl font-display text-gray-400 uppercase tracking-widest mt-4">
+            No Big Prize
+          </div>
+          <div className="flex-1 flex flex-col items-center justify-center text-gray-400 text-sm font-ui space-y-2">
+            {kind === 'none' ? (
+              <>
+                <p>The draw came up empty.</p>
+                <p>The run still counts toward your rank.</p>
+              </>
+            ) : (
+              <p>Not this time.</p>
+            )}
+          </div>
+          <div className="text-xs font-ui text-gray-500 uppercase tracking-widest mb-4">
+            Most runs land here
+          </div>
+        </motion.div>
+      )}
     </div>
   );
 }

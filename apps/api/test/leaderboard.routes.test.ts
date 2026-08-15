@@ -110,7 +110,9 @@ describe('GET /leaderboard', () => {
     await runs.commit(run.id, {
       seedHash: 'hash',
       seed: 'seed',
-      setup: { algoVersion: 'encounter-v1' } as never,
+      // A real, minimal setup rather than a stub: `commit` normalizes what it is
+      // given so the store holds both readings of it, and nothing here replays.
+      setup: { monsterTableId: 'forsaken-crypt', party: [] },
       commitSignature: null,
       oracleAddress: null,
       committedAt: params.at,

@@ -228,7 +228,7 @@ export async function registerDungeonRoutes(
     }
 
     const character = parseCharacter(body.character);
-    const powerUpTiers = await resolveLoadout(deps.powerUps, session.sub, body.powerUpTokenIds);
+    const powerUpItems = await resolveLoadout(deps.powerUps, session.sub, body.powerUpTokenIds);
 
     const run = await deps.runs.createFreeRun({
       spawnId: spawn.id,
@@ -240,7 +240,7 @@ export async function registerDungeonRoutes(
     // Commit before the player can act. The seed hash goes out in this same
     // response, so it is provably fixed before the first action rather than
     // chosen once we know what they did.
-    const setup = await deps.combat.buildSetup(run, spawn.monsterTableId, character, powerUpTiers);
+    const setup = await deps.combat.buildSetup(run, spawn.monsterTableId, character, powerUpItems);
     const committed = await deps.oracle.commit(run.id, setup);
 
     const view = await deps.oracle.view(run.id);

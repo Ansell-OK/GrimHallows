@@ -15,6 +15,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_ARCHETYPE,
   ENCOUNTER_ALGO_VERSION,
   EncounterError,
   GUARD_DEFENSE_BONUS,
@@ -28,9 +29,11 @@ import {
   getEncounterTable,
   getMonster,
   getPower,
+  legacyItems,
   parseDiceFormula,
   runEncounter,
   statModifier,
+  type CombatTurn,
   type EncounterSetup,
   type PlayerAction,
 } from '../src/index.js';
@@ -47,7 +50,7 @@ const HERO: EncounterSetup['party'][number] = {
   // engine, and a change to stat derivation shouldn't be able to quietly
   // re-tune every assertion below.
   stats: { hp: 120, str: 18, agi: 14, int: 8, vit: 16 },
-  powerUpTiers: [],
+  powerUpItems: [],
 };
 
 const setup = (overrides: Partial<EncounterSetup> = {}): EncounterSetup => ({
@@ -503,9 +506,15 @@ describe('equipped power-ups', () => {
    * turn's stride, so equipping something changes what a hit is worth without
    * changing whether it landed. Several tests below rely on that: they compare a
    * geared run against a bare one on the same seed and expect the same hit.
+   *
+   * Takes bare tiers and wraps them as `relic` items, which is not laziness: the
+   * assertions below are the pre-archetype ones, unchanged, and `relic` is what
+   * every token minted before archetypes parses to. Them still passing against
+   * the same expected numbers is the evidence that widening the loadout to
+   * (archetype, tier) did not move a historical run.
    */
   const equipped = (tiers: readonly number[]): EncounterSetup =>
-    setup({ party: [{ ...HERO, powerUpTiers: tiers }] });
+    setup({ party: [{ ...HERO, powerUpItems: legacyItems(tiers) }] });
 
   /** A seed whose opening Strike lands, so there are damage dice to compare. */
   const seedThatHits = (): string => {
@@ -611,7 +620,7 @@ describe('equipped power-ups', () => {
     // is the worst case a player can legally build. If it overruns the stride,
     // combat aborts mid-run — so the cap and the stride are checked against each
     // other here rather than trusted to stay in sync by comment.
-    const worst = Array.from({ length: MAX_EQUIPPED_POWER_UPS }, () => 4);
+    const worst = legacyItems(Array.from({ length: MAX_EQUIPPED_POWER_UPS }, () => 4));
     const widest = Math.max(
       ...classPowerIds('warrior')
         .map((id) => getPower(id)!.diceFormula)
@@ -619,6 +628,84 @@ describe('equipped power-ups', () => {
         .map((f) => parseDiceFormula(applyPowerUps(f, worst)!).count),
     );
     expect(widest).toBeLessThanOrEqual(MAX_DAMAGE_DICE);
+  });
+});
+
+describe('archetypes did not move a run that already happened', () => {
+  /**
+   * THE TEST THAT KEEPS `ENCOUNTER_ALGO_VERSION` AT v1.
+   *
+   * `encounter.ts:32-38` sets the standard: bump the version unless you can write
+   * the test showing the change is an equivalence. This is that test, and it is
+   * load-bearing in a way most of the suite is not — if it cannot be written, the
+   * version must be bumped, and bumping has its own prerequisite (storing the
+   * version per run, because `toVerification` publishes the live constant and a
+   * bump would relabel every historical run as `encounter-v2`).
+   *
+   * What it proves: a setup carrying the OLD shape — bare tiers, no archetype —
+   * and the same setup normalized into the NEW shape produce the identical fight,
+   * turn for turn and byte for byte in the view. The reason it holds is that
+   * `relic` is the archetype every pre-archetype token parses to, and `relic`'s
+   * vectors are copied from the tier table it replaces.
+   *
+   * The legacy side is built with a cast rather than with `legacyItems`, on
+   * purpose: using the normalizer on both sides would compare the new code to
+   * itself and pass no matter what the table said. The cast reproduces what a
+   * stored `encounter_setup_json` from before this change actually contains.
+   */
+  const LEGACY_TIERS = [2, 3, 4] as const;
+
+  const legacySetup = (): EncounterSetup =>
+    setup({
+      party: [
+        {
+          ...HERO,
+          // What `fromRow` reads off a pre-archetype row, before it normalizes.
+          powerUpItems: LEGACY_TIERS.map((tier) => ({
+            archetype: DEFAULT_ARCHETYPE,
+            tier,
+          })),
+        },
+      ],
+    });
+
+  it('replays a legacy tier setup byte-identically', () => {
+    const normalized = setup({
+      party: [{ ...HERO, powerUpItems: legacyItems([...LEGACY_TIERS]) }],
+    });
+    const { actions } = autoplay(SEED, legacySetup());
+
+    const before = runEncounter(SEED, legacySetup(), actions);
+    const after = runEncounter(SEED, normalized, actions);
+
+    expect(after.turns).toEqual(before.turns);
+    expect(after.view).toEqual(before.view);
+  });
+
+  it('gives a legacy loadout exactly the numbers the tier table gave it', () => {
+    // The equivalence stated at the level a reader can check by hand, so that the
+    // deep-equal above is not the only evidence. Tiers 2/3/4 granted +1/+2/+3
+    // Defense and no HP under `powerup-v1`; `relic` must still grant precisely
+    // that, or a stored run's defenseDc changed underneath it.
+    const bare = runEncounter(SEED, setup()).view.combatants.find((c) => c.id === 'p0')!;
+    const geared = runEncounter(SEED, legacySetup()).view.combatants.find((c) => c.id === 'p0')!;
+    expect(geared.defenseDc).toBe(bare.defenseDc + 6);
+    expect(geared.maxHp).toBe(bare.maxHp);
+    expect(geared.hp).toBe(bare.hp);
+  });
+
+  it('does move the fight once a real archetype is equipped', () => {
+    // The control. Without this, the two tests above would pass just as happily
+    // if `powerUpItems` were being ignored altogether — which is exactly the
+    // failure mode a "nothing changed" proof is blind to.
+    const swords: EncounterSetup = setup({
+      party: [{ ...HERO, powerUpItems: [{ archetype: 'chestplate', tier: 4 }] }],
+    });
+    const bare = runEncounter(SEED, setup()).view.combatants.find((c) => c.id === 'p0')!;
+    const tank = runEncounter(SEED, swords).view.combatants.find((c) => c.id === 'p0')!;
+    expect(tank.maxHp).toBe(bare.maxHp + 30);
+    // Walks in at full health rather than at a fraction of a larger pool.
+    expect(tank.hp).toBe(tank.maxHp);
   });
 });
 
@@ -668,5 +755,356 @@ describe('the view handed to the client', () => {
       expect(m.address).toBeNull();
     }
     expect(view.combatants.find((c) => c.id === 'p0')!.address).toBe(HERO.address);
+  });
+});
+
+/**
+ * Potions: the first power that comes from an item rather than a class, the first
+ * that moves HP upward, and the first that can run out.
+ *
+ * Each of those is a place the engine previously had an invariant it no longer
+ * has, so the tests below are mostly about what must NOT have broken. HP was
+ * monotonically non-increasing; a turn always either rolled damage or rolled
+ * nothing; every power a fighter held came from `classPowerIds`. A heal violates
+ * all three deliberately, and the risk is that it violates a fourth by accident.
+ *
+ * The one that would be silent is the derivation slots. A heal rolls from
+ * `SLOT_DAMAGE` — the same span a damage roll would have used — on the argument
+ * that a turn is exactly one of attack, guard or heal. If that argument is wrong
+ * the fight still resolves and still looks reasonable; it is simply no longer the
+ * fight the seed specifies, and nobody notices until a verifier disagrees. Hence
+ * the collision sweep, which checks the property directly rather than trusting
+ * the reasoning.
+ */
+describe('potions and healing', () => {
+  /** A hero small enough that one draught cannot be lost to the maxHp clamp. */
+  const WOUNDABLE: EncounterSetup['party'][number] = {
+    ...HERO,
+    stats: { ...HERO.stats, hp: 60 },
+    powerUpItems: [{ archetype: 'elixir', tier: 1 }],
+  };
+
+  const withPotion = (overrides: Partial<typeof WOUNDABLE> = {}): EncounterSetup =>
+    setup({ party: [{ ...WOUNDABLE, ...overrides }] });
+
+  /** A heal carries no target, which is the shape a Guard already uses. */
+  const drink = (powerId: string): PlayerAction => ({ powerId, targetId: null });
+
+  /** The drinker's HP immediately before a given turn, read out of the log. */
+  const hpBefore = (turns: readonly CombatTurn[], turn: CombatTurn, maxHp: number): number =>
+    turns
+      .filter((t) => t.turnNumber < turn.turnNumber && t.targetId === turn.actorId)
+      .at(-1)?.targetHpAfter ?? maxHp;
+
+  /** Actions that get the hero hurt, then have them drink. */
+  function drinkAfterDamage(
+    base: EncounterSetup,
+    potionId: string,
+  ): { actions: PlayerAction[]; result: ReturnType<typeof runEncounter> } {
+    const attackId = classPowerIds(base.party[0].charClass)[0];
+    const actions: PlayerAction[] = [];
+    // Guard is never chosen here: it would raise the hero's DC and could stop
+    // the monsters landing the hit this whole fixture depends on.
+    for (let i = 0; i < 12; i++) {
+      const partial = runEncounter(SEED, base, actions);
+      const hero = partial.view.combatants.find((c) => c.id === 'p0')!;
+      if (hero.hp < hero.maxHp) break;
+      const target = partial.view.combatants.find((c) => c.side === 'monsters' && c.hp > 0);
+      if (!target) break;
+      actions.push({ powerId: attackId, targetId: target.id });
+    }
+    actions.push(drink(potionId));
+    return { actions, result: runEncounter(SEED, base, actions) };
+  }
+
+  it('puts the granted power in the kit, after the three class powers', () => {
+    // Appended rather than interleaved: the combat UI lays the kit out in this
+    // order, so a player who equips a potion must not find Guard has moved.
+    const { view } = runEncounter(SEED, withPotion());
+    const hero = view.combatants.find((c) => c.id === 'p0')!;
+    expect(hero.powers.map((p) => p.id)).toEqual([...classPowerIds('warrior'), 'potion-heal-1']);
+  });
+
+  it('gives no granted power to a hero carrying no grant', () => {
+    // The other half of the same fact, and the reason every historical run is
+    // untouched: `relic` grants nothing, so the spread appends an empty tail.
+    const { view } = runEncounter(SEED, setup());
+    const hero = view.combatants.find((c) => c.id === 'p0')!;
+    expect(hero.powers.map((p) => p.id)).toEqual([...classPowerIds('warrior')]);
+    expect(hero.charges).toEqual({});
+  });
+
+  it('restores HP, logged as a heal against the drinker', () => {
+    const { result } = drinkAfterDamage(withPotion(), 'potion-heal-1');
+    const heal = result.turns.find((t) => t.action === 'heal')!;
+
+    expect(heal.actorId).toBe('p0');
+    // Self-targeted rather than null, so a client renders "X drinks, X is
+    // healed" from the shape it already uses for an attack.
+    expect(heal.targetId).toBe('p0');
+    expect(heal.targetName).toBe(WOUNDABLE.name);
+    expect(heal.damageDealt).toBe(0);
+    expect(heal.defeated).toBe(false);
+    // 2d4, so between 2 and 8 — and reported under its own key, because a
+    // client reading it as `damageRoll` would show a potion wounding its owner.
+    expect(heal.rolls.healRoll).toBeGreaterThanOrEqual(2);
+    expect(heal.rolls.healRoll).toBeLessThanOrEqual(8);
+    expect(heal.rolls.healDice).toHaveLength(2);
+    expect(heal.rolls.damageRoll).toBeUndefined();
+    expect(heal.rolls.attackRoll).toBeUndefined();
+  });
+
+  it('adds no stat modifier — it is the flask that heals, not the drinker', () => {
+    // STR 18 is a +4 modifier, which an attack would add. A heal that included
+    // it would make a potion scale with the wrong half of the character sheet.
+    const { result } = drinkAfterDamage(withPotion(), 'potion-heal-1');
+    const heal = result.turns.find((t) => t.action === 'heal')!;
+    const faces = heal.rolls.healDice!.reduce((a, b) => a + b, 0);
+    expect(heal.rolls.healRoll).toBe(faces);
+  });
+
+  it('leaves the HP it restored visible in the log and in the view', () => {
+    const { result } = drinkAfterDamage(withPotion(), 'potion-heal-1');
+    const heal = result.turns.find((t) => t.action === 'heal')!;
+    const before = hpBefore(result.turns, heal, WOUNDABLE.stats.hp);
+
+    // The applied result, which is what a health bar reads. Distinct from
+    // `healRoll` above precisely because the clamp can make them differ.
+    expect(heal.targetHpAfter).toBe(
+      Math.min(WOUNDABLE.stats.hp, before + heal.rolls.healRoll!),
+    );
+  });
+
+  it('clamps at maxHp rather than overhealing', () => {
+    // Without the clamp `toView` reports hp above maxHp and the health bar
+    // overruns its track.
+    //
+    // The overheal has to be FORCED, not assumed. Drinking at a scratch does not
+    // test the clamp — a 2d4 draught on a hero at 57/60 can legitimately land
+    // under max, and an earlier draft of this test asserted `hp === maxHp` and
+    // failed for exactly that reason. Drinking at full health is the one state
+    // where every roll must be discarded, and it is also a thing a player does
+    // by accident.
+    const { turns } = runEncounter(SEED, withPotion(), [drink('potion-heal-1')]);
+    const heal = turns.find((t) => t.action === 'heal')!;
+
+    // Read the maximum off the setup, not off `view.combatants[0].hp`: the final
+    // view is the state after the WHOLE replay, and a monster acting later in the
+    // round has already taken the hero back below max by then. The clamp lives on
+    // the heal turn, so the heal turn is where it has to be read.
+    const maxHp = WOUNDABLE.stats.hp;
+
+    expect(heal.rolls.healRoll).toBeGreaterThan(0);
+    expect(hpBefore(turns, heal, maxHp)).toBe(maxHp);
+    expect(heal.targetHpAfter).toBe(maxHp);
+  });
+
+  it('is not amplified by an equipped weapon', () => {
+    // The headline hazard. `applyPowerUps` adds a sword's flatDamage to a
+    // formula, and `flatDamage` is deliberately the one uncapped axis — routing
+    // a heal through it would let three legendary swords add +27 HP a sip.
+    //
+    // Asserted on the button text and the rolled value together: the first is
+    // what the player is promised, the second is what they get, and a bug that
+    // moved only one of them would be a lie rather than a balance error.
+    const armed = withPotion({
+      powerUpItems: [
+        { archetype: 'elixir', tier: 1 },
+        { archetype: 'sword', tier: 4 },
+      ],
+    });
+
+    const { view } = runEncounter(SEED, armed);
+    const hero = view.combatants.find((c) => c.id === 'p0')!;
+    const potion = hero.powers.find((p) => p.id === 'potion-heal-1')!;
+    const strike = hero.powers.find((p) => p.id === 'warrior-strike')!;
+
+    expect(potion.diceFormula).toBe(getPower('potion-heal-1')!.diceFormula);
+    // The control: the same loadout very much does upgrade the attack, so this
+    // is not passing because the sword is being ignored altogether.
+    expect(strike.diceFormula).not.toBe(getPower('warrior-strike')!.diceFormula);
+
+    const { result } = drinkAfterDamage(armed, 'potion-heal-1');
+    const heal = result.turns.find((t) => t.action === 'heal')!;
+    expect(heal.rolls.healDice).toHaveLength(2);
+    expect(heal.rolls.healRoll).toBeLessThanOrEqual(8);
+  });
+
+  describe('charges', () => {
+    it('opens with the charge count the power declares', () => {
+      const { view } = runEncounter(SEED, withPotion());
+      const hero = view.combatants.find((c) => c.id === 'p0')!;
+      expect(hero.charges).toEqual({ 'potion-heal-1': 1 });
+    });
+
+    it('spends one on use', () => {
+      const { view } = runEncounter(SEED, withPotion(), [drink('potion-heal-1')]);
+      const hero = view.combatants.find((c) => c.id === 'p0')!;
+      expect(hero.charges['potion-heal-1']).toBe(0);
+    });
+
+    it('refuses a second use, distinctly from a cooldown', () => {
+      // A separate code because the two are different answers: a cooldown says
+      // "not yet" and a spent charge says "not again this dungeon". A client
+      // that showed a wait timer for the second would promise a potion that is
+      // never coming back. `potion-heal-1` has cooldown 0, so nothing else here
+      // could be doing the rejecting.
+      expect(getPower('potion-heal-1')!.cooldown).toBe(0);
+
+      const attempt = () =>
+        runEncounter(SEED, withPotion(), [drink('potion-heal-1'), drink('potion-heal-1')]);
+
+      expect(attempt).toThrow(EncounterError);
+      try {
+        attempt();
+      } catch (err) {
+        expect((err as EncounterError).code).toBe('POWER_OUT_OF_CHARGES');
+      }
+    });
+
+    it('does not stack when the same potion is equipped twice', () => {
+      // `grantedPowerIds` dedupes, so two tier-1 elixirs grant one draught.
+      // Wearing the same flask twice does not refill it — the alternative would
+      // make three elixirs a 3× heal at no extra budget cost.
+      const doubled = withPotion({
+        powerUpItems: [
+          { archetype: 'elixir', tier: 1 },
+          { archetype: 'elixir', tier: 1 },
+        ],
+      });
+      const { view } = runEncounter(SEED, doubled);
+      const hero = view.combatants.find((c) => c.id === 'p0')!;
+
+      expect(hero.powers.filter((p) => p.id === 'potion-heal-1')).toHaveLength(1);
+      expect(hero.charges).toEqual({ 'potion-heal-1': 1 });
+    });
+
+    it('grants both draughts when two different tiers are equipped', () => {
+      // The counterpart: distinct ids are distinct consumables, so a hero
+      // carrying two different flasks gets two drinks.
+      const mixed = withPotion({
+        powerUpItems: [
+          { archetype: 'elixir', tier: 1 },
+          { archetype: 'elixir', tier: 3 },
+        ],
+      });
+      const { view } = runEncounter(SEED, mixed);
+      const hero = view.combatants.find((c) => c.id === 'p0')!;
+
+      expect(hero.charges).toEqual({ 'potion-heal-1': 1, 'potion-heal-3': 1 });
+    });
+
+    it('leaves unlimited powers out of the map entirely', () => {
+      // A missing key means unlimited, not zero. If class powers were listed
+      // here with some sentinel, the first reader to treat the map uniformly
+      // would ground every basic attack in the game.
+      const { view } = runEncounter(SEED, withPotion());
+      const hero = view.combatants.find((c) => c.id === 'p0')!;
+      for (const id of classPowerIds('warrior')) {
+        expect(hero.charges[id]).toBeUndefined();
+      }
+    });
+
+    it('leaves the encounter untouched when the action after a drink is rejected', () => {
+      // Replay is all-or-nothing: a rejected action throws the whole call rather
+      // than returning a partial view, so "the charge was not spent" is not
+      // directly observable from outside. What IS observable — and what a client
+      // retrying after an error depends on — is that the valid prefix replays to
+      // exactly the state it reached before the bad action was appended. The
+      // charge accounting lives inside that state, and so does the proof that a
+      // failed call left no mutable residue on the shared setup object.
+      const base = withPotion();
+      const prefix: PlayerAction[] = [drink('potion-heal-1')];
+      const before = runEncounter(SEED, base, prefix);
+
+      expect(() =>
+        runEncounter(SEED, base, [...prefix, { powerId: 'warrior-cleave', targetId: 'nobody' }]),
+      ).toThrow(EncounterError);
+
+      const after = runEncounter(SEED, base, prefix);
+      expect(after.turns).toEqual(before.turns);
+      expect(after.view).toEqual(before.view);
+      expect(after.view.combatants.find((c) => c.id === 'p0')!.charges['potion-heal-1']).toBe(0);
+    });
+  });
+
+  /**
+   * The slot-reuse argument, checked rather than trusted.
+   *
+   * A heal rolls from `SLOT_DAMAGE` onward — the span a damage roll would have
+   * used — because a turn is exactly one of attack, guard or heal. The claim is
+   * that no two rolls in a run can therefore share a derivation index. This is
+   * the assertion that would fail if some future turn ever did two things.
+   */
+  it('reuses the damage slots without colliding with anything, across a full run', () => {
+    const base = withPotion();
+    const attackId = classPowerIds('warrior')[0];
+    const actions: PlayerAction[] = [];
+    let result = runEncounter(SEED, base, actions);
+    let drunk = false;
+
+    while (!result.view.outcome && actions.length < MAX_TURNS) {
+      const hero = result.view.combatants.find((c) => c.id === 'p0')!;
+      if (!drunk && hero.hp < hero.maxHp) {
+        actions.push(drink('potion-heal-1'));
+        drunk = true;
+      } else {
+        const target = result.view.combatants.find((c) => c.side === 'monsters' && c.hp > 0);
+        if (!target) break;
+        actions.push({ powerId: attackId, targetId: target.id });
+      }
+      result = runEncounter(SEED, base, actions);
+    }
+
+    // The fixture is worthless if the hero never drank, and a later balance
+    // change could quietly make that so.
+    expect(drunk).toBe(true);
+    expect(result.turns.some((t) => t.action === 'heal')).toBe(true);
+
+    // Mirrors the engine's private slot offsets. Deliberately duplicated rather
+    // than exported: they are an internal layout detail, and a test that had to
+    // widen the public surface to check them would be pinning the wrong thing.
+    // If these drift from `encounter.ts`, this test stops proving anything —
+    // which is why the offsets are named here instead of appearing as bare 0/1.
+    const slotAttack = 0;
+    const slotDamage = 1;
+
+    // Every index every roll in the run consumed, counted. `derivationIndex` is
+    // the turn's first slot; dice run forward from a known offset within it.
+    const used: number[] = [];
+    for (const turn of result.turns) {
+      // Both readings start at the same offset, which is the whole point.
+      const dice = turn.rolls.damageDice ?? turn.rolls.healDice;
+      if (turn.rolls.attackDice) used.push(turn.derivationIndex + slotAttack);
+      if (dice) {
+        for (let i = 0; i < dice.length; i++) used.push(turn.derivationIndex + slotDamage + i);
+      }
+    }
+
+    expect(new Set(used).size).toBe(used.length);
+    // A monster's target draw takes the last slot of its own turn, so the sweep
+    // above is only meaningful if it actually covered several turns of both
+    // kinds rather than passing on a two-entry list.
+    expect(used.length).toBeGreaterThan(result.turns.length);
+  });
+
+  /**
+   * And the reason none of this forces an `ENCOUNTER_ALGO_VERSION` bump.
+   *
+   * By the engine's own standard (`encounter.ts` header: bump unless you can
+   * write the equivalence test), this is that test. A run with no granted power
+   * cannot reach the heal branch, cannot hold a charge, and gets an empty tail
+   * spread onto its kit — so the whole feature is unreachable for every run that
+   * has ever been played, and relabelling those runs `encounter-v2` would assert
+   * they were resolved under rules that did not exist.
+   */
+  it('changes nothing about a run played without a potion', () => {
+    const before = autoplay(SEED);
+    const after = autoplay(SEED, setup({ party: [{ ...HERO, powerUpItems: [] }] }));
+
+    expect(after.result.turns).toEqual(before.result.turns);
+    expect(after.result.view).toEqual(before.result.view);
+    expect(after.result.turns.some((t) => t.action === 'heal')).toBe(false);
+    expect(ENCOUNTER_ALGO_VERSION).toBe('encounter-v1');
   });
 });

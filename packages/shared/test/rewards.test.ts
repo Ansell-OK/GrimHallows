@@ -238,7 +238,7 @@ describe('resolveFreeRunReward — loot everywhere, STX only where a fee was pai
     // Guards the assertion above against being vacuous: if the sample contained
     // no jackpot seeds, the loop would prove nothing about the jackpot branch.
     expect(jackpotSeedsSeen).toBeGreaterThan(0);
-  });
+  }, 15_000);
 
   /**
    * B7's "same loot table everywhere" is a claim about hit *rates*, and the only

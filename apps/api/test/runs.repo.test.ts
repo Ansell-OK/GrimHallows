@@ -43,7 +43,7 @@ const SETUP: EncounterSetup = {
       name: 'Character #7',
       charClass: 'warrior',
       stats: { hp: 30, str: 14, agi: 11, int: 8, vit: 12 },
-      powerUpTiers: [],
+      powerUpItems: [],
     },
   ],
 };
@@ -170,6 +170,61 @@ describe('MemoryRunStore', () => {
 
     it('returns null for a run that does not exist', async () => {
       expect(await runs.commit('999999', commitDetails())).toBeNull();
+    });
+
+    /**
+     * The setup is stored once and read two ways, and both readings are load-bearing.
+     *
+     * `setup` is what `runEncounter` takes. `storedSetup` is what the column
+     * holds, which for a run committed before archetypes is a different shape —
+     * and it is the one the oracle's transcript hash was taken over, so it has to
+     * survive the round trip rather than being normalized away on the way in.
+     *
+     * Pinned on the memory store because it is the only one these unit tests can
+     * reach, and because the store is where the two could silently become one
+     * value under two names. `PostgresRunStore.fromRow` splits the same way; this
+     * is the half of that agreement a test can hold.
+     */
+    describe('the stored setup and the runnable one', () => {
+      it('keeps both readings of a modern setup, which are the same value', async () => {
+        const run = await newRun();
+        const committed = (await runs.commit(run.id, commitDetails()))!;
+
+        expect(committed.setup).toEqual(SETUP);
+        expect(committed.storedSetup).toEqual(SETUP);
+      });
+
+      it('keeps a pre-archetype loadout as stored while exposing a runnable reading', async () => {
+        const run = await newRun();
+        // Cast because `CommitDetails.setup` is deliberately the CURRENT shape:
+        // no production write path may persist a legacy one, so the only way to
+        // reproduce a row from before archetypes is to inject it here. This is
+        // the row shape that actually exists on mainnet today.
+        const legacy = {
+          monsterTableId: 'forsaken-crypt',
+          party: [{ ...SETUP.party[0], powerUpItems: undefined, powerUpTiers: [2] }],
+        } as unknown as EncounterSetup;
+
+        const committed = (await runs.commit(run.id, commitDetails({ setup: legacy })))!;
+
+        // The row, unchanged. This is what gets hashed and published.
+        expect(committed.storedSetup).toEqual(legacy);
+        // And the reading the engine can run, with the tier read as `relic` —
+        // whose per-tier bonuses are byte-identical to the table that run was
+        // played under, which is why this is a faithful reading and not a guess.
+        expect(committed.setup?.party[0]?.powerUpItems).toEqual([
+          { archetype: 'relic', tier: 2 },
+        ]);
+        // Stripped, not carried alongside: a member holding both would let a
+        // later reader pick the stale half and replay a different fight.
+        expect(committed.setup?.party[0]).not.toHaveProperty('powerUpTiers');
+      });
+
+      it('leaves both null before a commit, so neither can be read as an empty setup', async () => {
+        const run = await newRun();
+        expect(run.setup).toBeNull();
+        expect(run.storedSetup).toBeNull();
+      });
     });
   });
 

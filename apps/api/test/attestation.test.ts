@@ -22,6 +22,8 @@
 
 import { describe, expect, it } from 'vitest';
 import { getAddressFromPrivateKey } from '@stacks/transactions';
+import type { StoredEncounterSetup } from '@grimhallow/shared';
+import { normalizeStoredSetup } from '@grimhallow/shared';
 import {
   COMMIT_STATEMENT_TAG,
   RESOLVE_STATEMENT_TAG,
@@ -170,6 +172,83 @@ describe('transcriptHash', () => {
 
   it('is 32 bytes of hex', async () => {
     expect(transcriptHash(setup, actions)).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+/**
+ * Which of a row's two readings the hash is taken over — and why it matters.
+ *
+ * `encounter_setup_json` is written once at commit time and never migrated, so a
+ * row committed before archetypes spells a loadout `powerUpTiers: number[]` and
+ * a row committed since spells it `powerUpItems: EquippedItem[]`.
+ * `normalizeStoredSetup` turns the first into the second so the engine can
+ * replay it, and `RunRecord` carries both readings for that reason.
+ *
+ * The hash must come from the STORED one. There is no `transcript_hash` column:
+ * it is recomputed on every read, while the `resolve_signature` sitting in the
+ * same row embeds the value computed when the run was settled — over the bytes
+ * the row held then. Hash the normalized reading instead and every legacy free
+ * run publishes a fingerprint that contradicts its own published signature,
+ * forever, with no way for a player to tell that from a backend rewriting
+ * history.
+ *
+ * These two tests are the ones that would have caught it. The first is the
+ * regression; the second is why the fix is safe to ship — the two readings are
+ * the same bytes for every run committed since archetypes landed, so this
+ * changes nothing for anything current.
+ */
+describe('transcriptHash over a stored setup', () => {
+  const actions = [{ powerId: 'warrior-strike', targetId: 'm0' }];
+
+  const member = {
+    id: 'p0',
+    address: 'ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM',
+    name: 'Character #7',
+    charClass: 'warrior' as const,
+    stats: { hp: 30, str: 14, agi: 11, int: 8, vit: 12 },
+  };
+
+  /** A row as it was written before archetypes existed. No cast: the stored type declares this shape. */
+  const legacy: StoredEncounterSetup = {
+    monsterTableId: 'forsaken-crypt',
+    party: [{ ...member, powerUpTiers: [2, 3] }],
+  };
+
+  const modern: StoredEncounterSetup = {
+    monsterTableId: 'forsaken-crypt',
+    party: [
+      { ...member, powerUpItems: [{ archetype: 'relic', tier: 2 }, { archetype: 'relic', tier: 3 }] },
+    ],
+  };
+
+  it('is not the hash of the normalized reading, when the two differ', async () => {
+    // The regression, stated as the inequality it is. `powerUpTiers` and
+    // `powerUpItems` are different keys with different values, and
+    // `canonicalize` covers the whole object — so these cannot agree, and the
+    // signature in the row was taken over the left-hand one.
+    const normalized = normalizeStoredSetup(legacy);
+    expect(transcriptHash(legacy, actions)).not.toBe(transcriptHash(normalized, actions));
+  });
+
+  it('normalizes a legacy loadout to relic, which is what makes the row replayable', async () => {
+    // Pinned here rather than left implicit because the inequality above is only
+    // a defect if the normalization is real. If this ever returned the tiers
+    // untouched, the test above would be asserting that two spellings of the
+    // same bytes differ.
+    expect(normalizeStoredSetup(legacy).party[0]?.powerUpItems).toEqual([
+      { archetype: 'relic', tier: 2 },
+      { archetype: 'relic', tier: 3 },
+    ]);
+  });
+
+  it('is unchanged by normalization for a row committed since archetypes', async () => {
+    // Why hashing the stored form is a no-op on everything current, and so needs
+    // no algo-version bump: for a modern row `normalizeStoredSetup` strips an
+    // absent key and re-adds the same array, and `canonicalize` sorts keys, so
+    // the bytes are identical whichever reading you hand it.
+    expect(transcriptHash(modern, actions)).toBe(
+      transcriptHash(normalizeStoredSetup(modern), actions),
+    );
   });
 });
 

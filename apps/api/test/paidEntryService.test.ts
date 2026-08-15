@@ -152,7 +152,7 @@ async function ingestError(chain: ChainClient, claimedBy = PLAYER): Promise<ApiE
       enterTxId: TX_ID,
       claimedBy,
       character: CHARACTER,
-      powerUpTiers: [],
+      powerUpItems: [],
     });
   } catch (err) {
     if (err instanceof ApiError) return err;
@@ -173,7 +173,7 @@ describe('PaidEntryService', () => {
         enterTxId: TX_ID,
         claimedBy: PLAYER,
         character: CHARACTER,
-        powerUpTiers: [],
+        powerUpItems: [],
       });
     });
 
@@ -213,7 +213,7 @@ describe('PaidEntryService', () => {
         enterTxId: TX_ID,
         claimedBy: PLAYER,
         character: CHARACTER,
-        powerUpTiers: [],
+        powerUpItems: [],
       });
 
       expect(again.run.id).toBe(result.run.id);
@@ -242,7 +242,7 @@ describe('PaidEntryService', () => {
         enterTxId: TX_ID,
         claimedBy: DEPLOYER,
         character: CHARACTER,
-        powerUpTiers: [],
+        powerUpItems: [],
       });
 
       expect(result.run.feePaidUstx).toBe('0');
@@ -263,7 +263,7 @@ describe('PaidEntryService', () => {
         enterTxId: TX_ID,
         claimedBy: PLAYER,
         character: CHARACTER,
-        powerUpTiers: [],
+        powerUpItems: [],
       });
 
       expect(result.run.feePaidUstx).toBe('0');
@@ -282,7 +282,7 @@ describe('PaidEntryService', () => {
         enterTxId: TX_ID,
         claimedBy: PLAYER,
         character: CHARACTER,
-        powerUpTiers: [],
+        powerUpItems: [],
       });
 
       expect(result.run.feePaidUstx).toBe(GATE_FEE);
@@ -320,7 +320,7 @@ describe('PaidEntryService', () => {
           enterTxId: TX_ID,
           claimedBy: PLAYER,
           character: CHARACTER,
-        powerUpTiers: [],
+        powerUpItems: [],
         }),
       ).rejects.toMatchObject({ code: 'RUN_NOT_COMMITTED', statusCode: 409 });
     });
@@ -425,7 +425,7 @@ describe('PaidEntryService', () => {
           enterTxId: TX_ID,
           claimedBy: PLAYER,
           character: CHARACTER,
-          powerUpTiers: [],
+          powerUpItems: [],
         })
         .catch(() => undefined);
 

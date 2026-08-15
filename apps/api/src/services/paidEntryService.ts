@@ -14,6 +14,7 @@ import { ClarityType, hexToCV } from '@stacks/transactions';
 import {
   type CharacterRef,
   type EncounterSetup,
+  type EquippedItem,
   type NetworkConfig,
   contractId as buildContractId,
   PAID_DUNGEON_MONSTER_TABLE_ID,
@@ -72,9 +73,9 @@ export class PaidEntryService {
     readonly enterTxId: string;
     readonly claimedBy: string;
     readonly character: CharacterRef;
-    readonly powerUpTiers: readonly number[];
+    readonly powerUpItems: readonly EquippedItem[];
   }): Promise<VerifiedPaidEntry> {
-    const { enterTxId, claimedBy, character, powerUpTiers } = args;
+    const { enterTxId, claimedBy, character, powerUpItems } = args;
     const normalized = normalizeTxId(enterTxId);
 
     // Already ingested? Re-read by txid rather than by id, which is what the
@@ -278,7 +279,7 @@ export class PaidEntryService {
       run,
       PAID_DUNGEON_MONSTER_TABLE_ID,
       character,
-      powerUpTiers,
+      powerUpItems,
     );
     const { seed, seedHash } = generateSeed();
 

@@ -7,13 +7,15 @@
  * four power-ups on the paid path because only the free path counted them would
  * have found a real balance hole.
  *
- * TOKEN IDS IN, TIERS OUT. What a power-up grants is decided by its on-chain
- * tier, so a request never carries one: it names tokens, and the tier of each is
- * read from `get-token-tier` after the wallet is confirmed to hold it. A request
- * that could carry a tier could carry a better one.
+ * TOKEN IDS IN, ITEMS OUT. What a power-up grants is decided by its on-chain
+ * `{uri, tier}` pair, so a request never carries either half of it: it names
+ * tokens, and both the tier and the archetype parsed out of the uri are read
+ * from the chain after the wallet is confirmed to hold the token. A request that
+ * could carry a tier could carry a better one — and now that archetype moves the
+ * dice too, the same is true of a slug.
  */
 
-import { MAX_EQUIPPED_POWER_UPS } from '@grimhallow/shared';
+import { MAX_EQUIPPED_POWER_UPS, type EquippedItem } from '@grimhallow/shared';
 import { badRequest } from './errors.js';
 import { PowerUpOwnershipError, type PowerUpService } from '../services/powerUpService.js';
 
@@ -59,7 +61,7 @@ export function parsePowerUpTokenIds(value: unknown): string[] {
 }
 
 /**
- * Shape-check a loadout, then resolve its tiers against the chain.
+ * Shape-check a loadout, then resolve it into equipped items against the chain.
  *
  * An ownership failure surfaces as a 400 rather than a 500: a wallet that does
  * not hold what it asked to equip is a bad request, not a server fault.
@@ -68,10 +70,10 @@ export async function resolveLoadout(
   powerUps: PowerUpService,
   address: string,
   value: unknown,
-): Promise<number[]> {
+): Promise<EquippedItem[]> {
   const tokenIds = parsePowerUpTokenIds(value);
   try {
-    return await powerUps.resolveEquippedTiers(address, tokenIds);
+    return await powerUps.resolveEquippedItems(address, tokenIds);
   } catch (err) {
     if (err instanceof PowerUpOwnershipError) {
       throw badRequest('POWER_UP_NOT_HELD', err.message);

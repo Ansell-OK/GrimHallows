@@ -3,8 +3,10 @@
  *
  * Everything on this screen is chain state. The recipe ladder is mirrored from
  * the contract's `recipes` map, the burnable items are the power-up NFTs the
- * wallet actually holds, and each item's tier is read from `get-token-tier`
- * rather than from its metadata (01-game-design.md#6).
+ * wallet actually holds, and what each item *does* comes from its on-chain tier
+ * and archetype — the tier from `get-token-tier`, the archetype parsed out of
+ * the uri string `get-token-uri` returns. The document that string addresses is
+ * never fetched (01-game-design.md#6).
  *
  * Three rules this screen is built around:
  *
@@ -36,6 +38,7 @@ import { TopBar } from '@/components/layout/TopBar';
 import { Button } from '@/components/ui/Button';
 import { TransactionOverlay, type TxState } from '@/components/ui/TransactionOverlay';
 import forgeBg from '@/assets/images/forge_bg_1785807961458.jpg';
+import imgLoot from '@/assets/images/reward_shadowbound_mantle_1785808903796.jpg';
 import {
   buildForge,
   errorMessage,
@@ -48,6 +51,8 @@ import {
 } from '@/lib/api';
 import { signingErrorMessage, signAndSubmit } from '@/lib/tx';
 import { loadActiveCharacter, loadSession } from '@/lib/session';
+import { lootArtFor } from '@/lib/lootArt';
+import { tierAccent, tierBorder } from '@/lib/tierStyle';
 import { useWallet } from '@/lib/wallet';
 import {
   formatStx,
@@ -60,22 +65,6 @@ import {
 const POLL_INTERVAL_MS = 4000;
 /** Roughly three minutes. After this the overlay stops claiming to know. */
 const MAX_POLLS = 45;
-
-/** Tailwind accent for a loot tier, matching the rarity colours used elsewhere. */
-function tierAccent(tier: number): string {
-  if (tier >= 4) return 'text-gold';
-  if (tier === 3) return 'text-blood';
-  if (tier === 2) return 'text-void';
-  return 'text-blue-400';
-}
-
-function tierBorder(tier: number, selected: boolean): string {
-  if (!selected) return 'border-stone';
-  if (tier >= 4) return 'border-gold';
-  if (tier === 3) return 'border-blood';
-  if (tier === 2) return 'border-void';
-  return 'border-blue-400';
-}
 
 export default function Forge() {
   const navigate = useNavigate();
@@ -598,6 +587,15 @@ function RecipeCard({
   );
 }
 
+/**
+ * One held item, offered up for burning.
+ *
+ * The art sits *behind* the text rather than above it. On the other screens the
+ * picture is the item; here the card is a destruction choice, and what decides
+ * it is the stat block — burning three tier-3s to make a tier-4 means giving up
+ * whatever those three were doing. So the archetype is shown, dimly, as
+ * recognition, and never at the cost of a line of text.
+ */
 function PowerUpCard({
   item,
   selected,
@@ -607,32 +605,37 @@ function PowerUpCard({
   selected: boolean;
   onClick: () => void;
 }) {
+  const art = lootArtFor(item.archetype, item.tier) ?? imgLoot;
   return (
     <motion.button
       layout
       exit={{ scale: 0, opacity: 0 }}
       transition={{ duration: 0.4 }}
       onClick={onClick}
-      className={`text-left w-40 border bg-obsidian/80 p-4 transition-colors hover:border-gray-400 ${tierBorder(
+      className={`text-left w-40 border bg-obsidian/80 p-4 transition-colors hover:border-gray-400 relative overflow-hidden ${tierBorder(
         item.tier,
         selected,
       )} ${selected ? 'shadow-[0_0_15px_rgba(107,47,160,0.3)]' : ''}`}
     >
-      <div className="flex justify-between items-start mb-2">
-        <span className={`font-ui text-[10px] uppercase tracking-widest ${tierAccent(item.tier)}`}>
-          {item.tierName}
-        </span>
-        {selected && <span className="text-gold text-xs">✓</span>}
-      </div>
-      <div className="font-display text-sm text-gray-200 mb-2">#{item.tokenId}</div>
-      {/* Every line below is derived from the on-chain tier by the shared bonus
-          table — never from the metadata URI, which is flavour only. */}
-      <div className="font-ui text-[10px] text-gray-400 leading-relaxed">{item.summary}</div>
-      {item.diceFormulaBonus && (
-        <div className="font-ui text-[10px] text-gray-500 mt-2 tracking-widest">
-          {item.diceFormulaBonus}
+      <img src={art} alt="" className="absolute inset-0 w-full h-full object-cover opacity-20" />
+      <div className="relative">
+        <div className="flex justify-between items-start mb-2">
+          <span className={`font-ui text-[10px] uppercase tracking-widest ${tierAccent(item.tier)}`}>
+            {item.tierName}
+          </span>
+          {selected && <span className="text-gold text-xs">✓</span>}
         </div>
-      )}
+        <div className="font-display text-sm text-gray-200 mb-2">{item.name}</div>
+        {/* Every line below is derived from the on-chain tier and archetype by the
+            shared bonus table — never from the document the metadata URI addresses,
+            which is not fetched. */}
+        <div className="font-ui text-[10px] text-gray-400 leading-relaxed">{item.summary}</div>
+        {item.diceFormulaBonus && (
+          <div className="font-ui text-[10px] text-gray-500 mt-2 tracking-widest">
+            {item.diceFormulaBonus}
+          </div>
+        )}
+      </div>
     </motion.button>
   );
 }

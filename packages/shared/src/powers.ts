@@ -1,12 +1,27 @@
 /**
- * The starter power kit — Attack, Guard, and one class special
- * (06-mvp-roadmap.md Phase 4).
+ * Every power a combatant can spend a turn on — class kits, monster powers, and
+ * the powers an equipped item grants (06-mvp-roadmap.md Phase 4).
  *
  * Content, not money. It lives in `shared` because a turn's log records only a
  * `powerId` (05-data-model.md `combat_turns.power_id`), so the API, the web app
  * and any verification tool have to agree on what that id rolls. A second copy
  * of this table would let a replay compute `2d6` where the server rolled `1d8`
  * and still call itself a verification.
+ *
+ * Two populations, and the distinction is load-bearing:
+ *
+ * - **Kit powers** — Attack, Guard, one class special, plus the monster list.
+ *   Reachable from `classPowerIds`, unlimited, and present in every run ever
+ *   played.
+ * - **Granted powers** — reachable only through an equipped item that declares
+ *   `grantsPowerId` in `lootArchetypes.ts`. `classPowerIds` never returns one,
+ *   which is exactly why adding them changed nothing about a historical replay:
+ *   no run predating archetypes can name one. They are also the only powers with
+ *   a `charges` limit.
+ *
+ * Their magnitudes are NOT chosen here. `GRANT_VALUE` prices each grant in
+ * budget units and the formula is derived from that price — see the comment on
+ * the granted-power block below, and `lootArchetypes.test.ts` for the assertion.
  *
  * Power ids are permanent. A logged turn references one forever, so renaming an
  * id silently rewrites history — add a new power instead.
@@ -39,6 +54,7 @@ const POWER_LIST: readonly Power[] = [
     kind: 'guard',
     diceFormula: null,
     cost: null,
+    charges: null,
     cooldown: 0,
     stat: 'vit',
     defenseBonus: GUARD_DEFENSE_BONUS,
@@ -52,6 +68,7 @@ const POWER_LIST: readonly Power[] = [
     kind: 'attack',
     diceFormula: '1d8',
     cost: null,
+    charges: null,
     cooldown: 0,
     stat: 'str',
     defenseBonus: 0,
@@ -63,6 +80,7 @@ const POWER_LIST: readonly Power[] = [
     kind: 'attack',
     diceFormula: '2d6',
     cost: null,
+    charges: null,
     cooldown: 3,
     stat: 'str',
     defenseBonus: 0,
@@ -76,6 +94,7 @@ const POWER_LIST: readonly Power[] = [
     kind: 'attack',
     diceFormula: '1d6',
     cost: null,
+    charges: null,
     cooldown: 0,
     stat: 'str',
     defenseBonus: 0,
@@ -87,6 +106,7 @@ const POWER_LIST: readonly Power[] = [
     kind: 'attack',
     diceFormula: '2d6',
     cost: null,
+    charges: null,
     cooldown: 3,
     stat: 'int',
     defenseBonus: 0,
@@ -100,6 +120,7 @@ const POWER_LIST: readonly Power[] = [
     kind: 'attack',
     diceFormula: '1d6',
     cost: null,
+    charges: null,
     cooldown: 0,
     stat: 'agi',
     defenseBonus: 0,
@@ -111,6 +132,7 @@ const POWER_LIST: readonly Power[] = [
     kind: 'attack',
     diceFormula: '3d4',
     cost: null,
+    charges: null,
     cooldown: 3,
     stat: 'agi',
     defenseBonus: 0,
@@ -124,6 +146,7 @@ const POWER_LIST: readonly Power[] = [
     kind: 'attack',
     diceFormula: '1d6',
     cost: null,
+    charges: null,
     cooldown: 0,
     stat: 'int',
     defenseBonus: 0,
@@ -135,8 +158,79 @@ const POWER_LIST: readonly Power[] = [
     kind: 'attack',
     diceFormula: '2d8',
     cost: null,
+    charges: null,
     cooldown: 4,
     stat: 'int',
+    defenseBonus: 0,
+  },
+
+  // --- Granted powers (from equipped loot) --------------------------------
+  // Not in any class kit. These reach a fighter only through an equipped item
+  // that declares `grantsPowerId`, which is why `classPowers()` never returns
+  // one and why no run predating archetypes can reference one.
+  //
+  // MAGNITUDES ARE DERIVED, NOT CHOSEN. `GRANT_VALUE` in `lootArchetypes.ts`
+  // prices these four at 2 / 3 / 4 / 6 budget units, and the rule converting a
+  // price into HP is that a granted heal is worth exactly the max HP it
+  // restores: `average × charges === GRANT_VALUE[id] / AXIS_COST.maxHp`, giving
+  // 5 / 7.5 / 10 / 15. `lootArchetypes.test.ts` asserts it.
+  //
+  // Pricing healing at parity with `maxHp` is deliberately the conservative
+  // side of the argument. A point of healing is strictly weaker than a point of
+  // max HP — it costs a turn to take and is wasted at full health — so this
+  // over-pays rather than under-pays for the grant. The alternative was to
+  // invent a discount factor, which is a free parameter the budget metric
+  // exists to avoid.
+  //
+  // A heal never adds the actor's stat modifier: it is the flask that heals,
+  // not the drinker. `stat` is 'vit' only because the field is required, and
+  // `resolveTurn` reads it on no path a heal takes.
+  {
+    id: 'potion-heal-1',
+    name: 'Draught of Mending',
+    description: 'Drink deep. Restores 2d4 HP, once per dungeon.',
+    kind: 'heal',
+    diceFormula: '2d4',
+    cost: null,
+    charges: 1,
+    cooldown: 0,
+    stat: 'vit',
+    defenseBonus: 0,
+  },
+  {
+    id: 'potion-heal-2',
+    name: 'Elixir of Mending',
+    description: 'Drink deep. Restores 3d4 HP, once per dungeon.',
+    kind: 'heal',
+    diceFormula: '3d4',
+    cost: null,
+    charges: 1,
+    cooldown: 0,
+    stat: 'vit',
+    defenseBonus: 0,
+  },
+  {
+    id: 'potion-heal-3',
+    name: 'Philtre of Renewal',
+    description: 'Drink deep. Restores 2d6+3 HP, once per dungeon.',
+    kind: 'heal',
+    diceFormula: '2d6+3',
+    cost: null,
+    charges: 1,
+    cooldown: 0,
+    stat: 'vit',
+    defenseBonus: 0,
+  },
+  {
+    id: 'potion-heal-4',
+    name: 'Panacea',
+    description: 'Drink deep. Restores 2d10+4 HP, once per dungeon.',
+    kind: 'heal',
+    diceFormula: '2d10+4',
+    cost: null,
+    charges: 1,
+    cooldown: 0,
+    stat: 'vit',
     defenseBonus: 0,
   },
 
@@ -151,6 +245,7 @@ const POWER_LIST: readonly Power[] = [
     kind: 'attack',
     diceFormula: '1d6',
     cost: null,
+    charges: null,
     cooldown: 0,
     stat: 'str',
     defenseBonus: 0,
@@ -162,6 +257,7 @@ const POWER_LIST: readonly Power[] = [
     kind: 'attack',
     diceFormula: '1d6',
     cost: null,
+    charges: null,
     cooldown: 0,
     stat: 'str',
     defenseBonus: 0,
@@ -173,6 +269,7 @@ const POWER_LIST: readonly Power[] = [
     kind: 'attack',
     diceFormula: '1d8',
     cost: null,
+    charges: null,
     cooldown: 0,
     stat: 'agi',
     defenseBonus: 0,
@@ -184,6 +281,7 @@ const POWER_LIST: readonly Power[] = [
     kind: 'attack',
     diceFormula: '1d8',
     cost: null,
+    charges: null,
     cooldown: 0,
     stat: 'int',
     defenseBonus: 0,
@@ -195,6 +293,7 @@ const POWER_LIST: readonly Power[] = [
     kind: 'attack',
     diceFormula: '1d8',
     cost: null,
+    charges: null,
     cooldown: 0,
     stat: 'str',
     defenseBonus: 0,
@@ -206,6 +305,7 @@ const POWER_LIST: readonly Power[] = [
     kind: 'attack',
     diceFormula: '1d10',
     cost: null,
+    charges: null,
     cooldown: 0,
     stat: 'str',
     defenseBonus: 0,

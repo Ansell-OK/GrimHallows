@@ -36,6 +36,27 @@
  * That claim is pinned by 'changes nothing at all when nothing is equipped' in
  * the test suite rather than left to argument, and it is the standard to hold a
  * future edit to: if you cannot write that test for your change, bump.
+ *
+ * ARCHETYPES held the version at v1 by the same standard, and the equivalence is
+ * broader, so it is worth stating what was checked:
+ *
+ *   - `powerUpTiers: number[]` became `powerUpItems: EquippedItem[]`, and a
+ *     stored setup carrying the old field is normalized to `relic` items on read.
+ *     `relic`'s per-tier vectors are byte-identical to the pre-archetype table,
+ *     so a replayed historical run rolls the same dice.
+ *   - The new `maxHp` addend is `powerUpMaxHpBonus(items)`, and `relic` grants no
+ *     maxHp at any tier — so it is exactly 0 for every run that exists.
+ *   - `MAX_TOTAL_DEFENSE_BONUS` is 9, which is exactly the old table's maximum
+ *     (three tier-4 items at +3), so the clamp cannot fire on a historical
+ *     loadout.
+ *
+ * Pinned by 'replays a legacy tier setup byte-identically'. NOT bumping is the
+ * deliberate choice and not an omission: `toVerification` publishes the LIVE
+ * constant rather than a per-run stored value, so a bump would relabel every
+ * historical run as `encounter-v2` and assert it was resolved under rules that
+ * did not exist when it ran — a worse verification defect than the one a bump
+ * would prevent. Bumping this constant needs `runs.encounter_algo_version`
+ * stored per run first.
  */
 
 import {
@@ -48,7 +69,14 @@ import {
   turnIndex,
 } from './dice.js';
 import { getEncounterTable, getMonster, type MonsterBlueprint } from './monsters.js';
-import { applyPowerUps, powerUpDefenseBonus } from './powerUps.js';
+import {
+  applyPowerUps,
+  grantedPowerIds,
+  legacyItems,
+  powerUpDefenseBonus,
+  powerUpMaxHpBonus,
+} from './powerUps.js';
+import type { EquippedItem } from './lootArchetypes.js';
 import { GUARD_DEFENSE_BONUS, classPowerIds, getPower } from './powers.js';
 import { defenseDc, statModifier } from './stats.js';
 import type {
@@ -104,19 +132,103 @@ export interface PartyMemberSetup {
   readonly charClass: CharClass;
   readonly stats: BaseStats;
   /**
-   * Power-up tiers equipped for this run, frozen at entry.
+   * Loot items equipped for this run, frozen at entry.
    *
-   * Each tier grants a dice-formula upgrade and defense bonus per
-   * `powerUpBonus(tier)`. The applied set is persisted here so a verifier can
-   * reproduce the exact damage rolls this combatant dealt: `applyPowerUps(base,
-   * tiers)` is deterministic, but only if you know which tiers were active.
+   * Each item grants a dice-formula upgrade, a defense bonus, and a max-HP bonus
+   * per `archetypeBonusVector(archetype, tier)`. The applied set is persisted
+   * here so a verifier can reproduce the exact damage rolls this combatant dealt:
+   * `applyPowerUps(base, items)` is deterministic, but only if you know which
+   * items were active.
+   *
+   * WAS `powerUpTiers: readonly number[]`. A stored setup from before archetypes
+   * still carries that field, and `fromRow` normalizes it on read — every token
+   * minted then parses to `relic`, whose vectors are byte-identical to the old
+   * tier table, so a historical run replays to the same turns and the same view.
+   * That equivalence is what keeps `ENCOUNTER_ALGO_VERSION` at v1, and it is
+   * pinned by a test rather than asserted here.
    */
-  readonly powerUpTiers: readonly number[];
+  readonly powerUpItems: readonly EquippedItem[];
 }
 
 export interface EncounterSetup {
   readonly monsterTableId: string;
   readonly party: readonly PartyMemberSetup[];
+}
+
+/**
+ * A setup as a stored row actually holds it, which is not always today's shape.
+ *
+ * `encounter_setup_json` is written by whatever build was running at commit time
+ * and never migrated, so it is a UNION over the history of `EncounterSetup` —
+ * not the current interface. Typing a row as the current one would be a lie the
+ * compiler happily enforces, and the failure would land in `runEncounter`,
+ * replaying a stored fight with no loadout at all.
+ *
+ * Exactly one field has changed shape so far: a party member carried
+ * `powerUpTiers: number[]` before archetypes and carries
+ * `powerUpItems: EquippedItem[]` after.
+ *
+ * THIS LIVES IN `shared`, NOT IN THE API, AND THAT IS THE POINT. These bytes are
+ * published verbatim in `VerificationData.setup` because they are what the
+ * oracle's transcript hash was taken over — so an outside verifier holds this
+ * shape, not the normalized one, and needs the same declared way to run it that
+ * we use. A stored-shape type private to the backend would leave them reverse
+ * engineering the normalization from a hash mismatch.
+ */
+export interface StoredPartyMemberSetup
+  extends Omit<PartyMemberSetup, 'powerUpItems'> {
+  readonly powerUpItems?: PartyMemberSetup['powerUpItems'];
+  /** Pre-archetype loadout. Present only on runs committed before Phase 4. */
+  readonly powerUpTiers?: readonly number[];
+}
+
+export interface StoredEncounterSetup extends Omit<EncounterSetup, 'party'> {
+  readonly party: readonly StoredPartyMemberSetup[];
+}
+
+/**
+ * Bring a stored setup up to the shape `runEncounter` takes.
+ *
+ * THE ONLY REASON THIS IS A NO-OP ON HISTORY: every token minted before
+ * archetypes existed carries a `tier-N.json` uri, which `parseLootUri` reads as
+ * `relic`, and `relic`'s per-tier vector is byte-identical to the `powerup-v1`
+ * table those runs were resolved under. So `legacyItems` is not a guess about
+ * what an old loadout meant — it is the same normalization a re-read of the
+ * chain would now produce for the same tokens, and
+ * `'replays a legacy tier setup byte-identically'` below is what pins it.
+ *
+ * That is also what keeps `ENCOUNTER_ALGO_VERSION` at v1. If this function ever
+ * has to do something a re-read of the chain would not do, the version has to be
+ * bumped — and stored per run first, for the reason in this file's header.
+ *
+ * It is deliberately NOT folded into `runEncounter`. The engine takes a setup
+ * that already means one thing; a normalizing engine would accept two spellings
+ * of a loadout and make "what was this fight built from" answerable two ways.
+ */
+export function normalizeStoredSetup(setup: StoredEncounterSetup): EncounterSetup;
+export function normalizeStoredSetup(setup: null): null;
+export function normalizeStoredSetup(
+  setup: StoredEncounterSetup | null,
+): EncounterSetup | null;
+export function normalizeStoredSetup(
+  setup: StoredEncounterSetup | null,
+): EncounterSetup | null {
+  if (setup === null) return null;
+
+  // Every member is rebuilt, including already-migrated ones, rather than
+  // returning the row untouched when nothing needs converting. A "does anything
+  // need work" fast path cannot be written here: `Array.prototype.some` is not a
+  // type guard, so the compiler still sees the wide stored type on the other
+  // side of it and the narrowing has to be redone anyway. Rebuilding
+  // unconditionally also strips `powerUpTiers` from a mixed row, so no consumer
+  // downstream can read the stale half of a member that has both.
+  return {
+    ...setup,
+    party: setup.party.map((member): PartyMemberSetup => {
+      const { powerUpTiers, powerUpItems, ...rest } = member;
+      return { ...rest, powerUpItems: powerUpItems ?? legacyItems(powerUpTiers ?? []) };
+    }),
+  };
 }
 
 /** One submitted player action. `targetId` is required for an attack. */
@@ -135,6 +247,7 @@ export type EncounterErrorCode =
   | 'UNKNOWN_POWER'
   | 'POWER_NOT_IN_KIT'
   | 'POWER_ON_COOLDOWN'
+  | 'POWER_OUT_OF_CHARGES'
   | 'INVALID_TARGET'
   | 'ENCOUNTER_ALREADY_RESOLVED';
 
@@ -166,12 +279,32 @@ interface Fighter {
   readonly address: string | null;
   readonly stats: BaseStats;
   readonly powerIds: readonly string[];
-  readonly powerUpTiers: readonly number[];
+  readonly powerUpItems: readonly EquippedItem[];
   readonly initiative: number;
   readonly maxHp: number;
   hp: number;
   guarding: boolean;
   cooldowns: Record<string, number>;
+  /**
+   * Uses left, for powers that declare a limit. Unlimited powers never appear.
+   *
+   * Seeded once in `buildFighters` from `Power.charges` and decremented on use.
+   * A missing key means unlimited, not zero — which is why every read goes
+   * through `chargesLeft` rather than indexing this directly.
+   */
+  charges: Record<string, number>;
+}
+
+/**
+ * Uses left for a power, or null when it has no limit.
+ *
+ * The distinction the map alone cannot make: `charges[id]` is `undefined` both
+ * for a power that never runs out and for one that has been spent down, and
+ * treating those the same either grounds every class attack or makes potions
+ * infinite.
+ */
+function chargesLeft(fighter: Fighter, chosen: Power): number | null {
+  return chosen.charges === null ? null : (fighter.charges[chosen.id] ?? 0);
 }
 
 function power(id: string): Power {
@@ -252,6 +385,26 @@ function initiativeFor(seed: string | Uint8Array, ordinal: number, stats: BaseSt
   return rollDie(seed, DERIVATION_INDEX.INITIATIVE_BASE + ordinal, 20) + statModifier(stats.agi);
 }
 
+/**
+ * Opening charge counts for a kit, keyed by power id.
+ *
+ * Only limited powers get an entry, so this is `{}` for every class kit and for
+ * every monster — which is the same empty object the field held before charges
+ * existed, and part of why nothing historical changes.
+ *
+ * Two copies of the same potion do NOT stack their charges: `grantedPowerIds`
+ * dedupes, so equipping two tier-1 elixirs grants one draught. Wearing the same
+ * flask twice does not refill it.
+ */
+function initialCharges(powerIds: readonly string[]): Record<string, number> {
+  const charges: Record<string, number> = {};
+  for (const id of powerIds) {
+    const p = getPower(id);
+    if (p && p.charges !== null) charges[id] = p.charges;
+  }
+  return charges;
+}
+
 function buildFighters(seed: string | Uint8Array, setup: EncounterSetup): Fighter[] {
   if (setup.party.length === 0) {
     throw new EncounterError('EMPTY_PARTY', 'An encounter needs at least one party member');
@@ -263,20 +416,37 @@ function buildFighters(seed: string | Uint8Array, setup: EncounterSetup): Fighte
   // An ordinal *is* the initiative derivation index, so it has to be a stable
   // function of position: party members in the order given, then monsters in
   // draw order. Reordering this reorders history.
-  const fighters: Fighter[] = setup.party.map((member, i) => ({
-    id: member.id,
-    side: 'party' as const,
-    name: member.name,
-    address: member.address,
-    stats: member.stats,
-    powerIds: classPowerIds(member.charClass),
-    powerUpTiers: member.powerUpTiers,
-    initiative: initiativeFor(seed, i, member.stats),
-    maxHp: member.stats.hp,
-    hp: member.stats.hp,
-    guarding: false,
-    cooldowns: {},
-  }));
+  const fighters: Fighter[] = setup.party.map((member, i) => {
+    // Added to BOTH maxHp and starting hp, so a tank walks in at full health
+    // rather than at a fraction of a larger pool — and so HP stays monotonically
+    // non-increasing everywhere, which the view and the outcome check rely on.
+    // Zero for every historical run: `relic` grants no maxHp at any tier.
+    const hpBonus = powerUpMaxHpBonus(member.powerUpItems);
+    // Kit first, then whatever the loadout grants, deduped and in loadout order
+    // by `grantedPowerIds`. Appending rather than interleaving keeps the three
+    // kit buttons in the fixed positions the combat UI lays them out in, so a
+    // player who equips a potion does not find Guard moving.
+    //
+    // Empty for every run committed before archetypes: `relic` grants nothing,
+    // and a legacy `powerUpTiers` row normalizes to relics. That is what keeps
+    // this change invisible to `ENCOUNTER_ALGO_VERSION`.
+    const powerIds = [...classPowerIds(member.charClass), ...grantedPowerIds(member.powerUpItems)];
+    return {
+      id: member.id,
+      side: 'party' as const,
+      name: member.name,
+      address: member.address,
+      stats: member.stats,
+      powerIds,
+      powerUpItems: member.powerUpItems,
+      initiative: initiativeFor(seed, i, member.stats),
+      maxHp: member.stats.hp + hpBonus,
+      hp: member.stats.hp + hpBonus,
+      guarding: false,
+      cooldowns: {},
+      charges: initialCharges(powerIds),
+    };
+  });
 
   roster.forEach((blueprint, i) => {
     fighters.push({
@@ -286,12 +456,13 @@ function buildFighters(seed: string | Uint8Array, setup: EncounterSetup): Fighte
       address: null,
       stats: blueprint.stats,
       powerIds: [blueprint.powerId],
-      powerUpTiers: [],
+      powerUpItems: [],
       initiative: initiativeFor(seed, setup.party.length + i, blueprint.stats),
       maxHp: blueprint.stats.hp,
       hp: blueprint.stats.hp,
       guarding: false,
       cooldowns: {},
+      charges: {},
     });
   });
 
@@ -323,7 +494,7 @@ function initiativeOrder(fighters: readonly Fighter[]): readonly string[] {
 
 function effectiveDc(target: Fighter): number {
   const base = defenseDc(target.stats);
-  const powerUpBonus = powerUpDefenseBonus(target.powerUpTiers);
+  const powerUpBonus = powerUpDefenseBonus(target.powerUpItems);
   const guardBonus = target.guarding ? GUARD_DEFENSE_BONUS : 0;
   return base + powerUpBonus + guardBonus;
 }
@@ -362,6 +533,53 @@ function resolveTurn(
     };
   }
 
+  if (chosen.kind === 'heal') {
+    // Placed before the target check on purpose: a heal is self-only, so it must
+    // not be rejected for lacking a target it never needed.
+    //
+    // SELF-ONLY, and that is a scope decision rather than a limitation. The party
+    // is built one member long (`combatService.ts`), so a heal aimed at an ally
+    // is unreachable code — and unreachable code that resolves a target is how a
+    // future party build gets a silently wrong `INVALID_TARGET` semantics. When
+    // parties grow, this is the branch that learns to take a target, and the
+    // action log already records enough to tell the two apart.
+    //
+    // Parsed straight off the power, NEVER through `applyPowerUps`. An equipped
+    // sword's `flatDamage` is damage; routing a heal through the damage upgrade
+    // would let a weapon amplify a potion, which is both absurd and a real
+    // balance hole given `flatDamage` is the one uncapped axis.
+    const formula = parseDiceFormula(chosen.diceFormula!);
+    // Same slots a damage roll would have used. A turn is exactly one of attack,
+    // guard or heal, so within a turn only one of these branches consumes them —
+    // and `turnIndex` already keeps turns from colliding with each other. No new
+    // reserved indices, and `TURN_STRIDE` is unchanged.
+    const heal = rollFormula(seed, turnIndex(turnNumber, SLOT_DAMAGE), formula);
+    // No stat modifier: it is the flask that heals, not the drinker.
+    //
+    // The clamp is required, not defensive. Without it `toView` reports hp above
+    // maxHp and the health bar overruns its track.
+    actor.hp = Math.min(actor.maxHp, actor.hp + heal.total);
+
+    return {
+      ...common,
+      action: 'heal',
+      // The actor is the target. Reusing the field rather than leaving it null
+      // means a client renders "X drinks, X is healed" from the same shape it
+      // already uses, and `targetHpAfter` below needs no special case.
+      targetId: actor.id,
+      targetName: actor.name,
+      rolls: { initiative: actor.initiative, healRoll: heal.total, healDice: heal.dice },
+      // Zero, and not negative damage. `damageDealt` is what a fight's damage
+      // totals sum over, and a heal that registered there would net out against
+      // a hit somewhere else in the log.
+      damageDealt: 0,
+      targetHpAfter: actor.hp,
+      // A heal cannot defeat anyone, and a downed fighter never gets a turn to
+      // drink one — so this is false by construction, not by luck.
+      defeated: false,
+    };
+  }
+
   if (!target) {
     throw new EncounterError('INVALID_TARGET', `"${chosen.name}" needs a target`);
   }
@@ -395,7 +613,7 @@ function resolveTurn(
 
   // Non-null by construction: every attack power carries a formula, and
   // powers.ts is the only source of powers.
-  const upgraded = applyPowerUps(chosen.diceFormula!, actor.powerUpTiers);
+  const upgraded = applyPowerUps(chosen.diceFormula!, actor.powerUpItems);
   const formula = parseDiceFormula(upgraded ?? chosen.diceFormula!);
   if (formula.count > MAX_DAMAGE_DICE) {
     throw new Error(
@@ -461,11 +679,16 @@ function startTurn(actor: Fighter): void {
  * for expressing bonuses on the die in the first place.
  *
  * `defenseDc` above is already reported this way, for the same reason.
+ *
+ * A heal is returned untouched. Its formula is healing, and `applyPowerUps` adds
+ * weapon damage — printing an equipped sword's flat bonus on a potion button
+ * would advertise a heal the resolver will not roll, which is the same
+ * illegibility this function exists to prevent.
  */
 function powerAsRolled(f: Fighter, id: string): Power {
   const base = power(id);
-  if (f.powerUpTiers.length === 0) return base;
-  const upgraded = applyPowerUps(base.diceFormula, f.powerUpTiers);
+  if (base.kind === 'heal' || f.powerUpItems.length === 0) return base;
+  const upgraded = applyPowerUps(base.diceFormula, f.powerUpItems);
   return upgraded === base.diceFormula ? base : { ...base, diceFormula: upgraded };
 }
 
@@ -483,6 +706,7 @@ function toView(f: Fighter): CombatantView {
     initiative: f.initiative,
     powers: f.powerIds.map((id) => powerAsRolled(f, id)),
     cooldowns: { ...f.cooldowns },
+    charges: { ...f.charges },
   };
 }
 
@@ -569,6 +793,21 @@ export function runEncounter(
           `"${chosen.name}" is on cooldown for ${cooling} more turn(s)`,
         );
       }
+      // Same reason this sits above `startTurn` as the cooldown does: a refused
+      // action must leave the encounter exactly as it was, or a client that
+      // retries after an error replays a fight whose Guard has already lapsed.
+      //
+      // A separate code from the cooldown because the two are not the same
+      // answer to the player: a cooldown says "not yet", a spent charge says
+      // "not again this dungeon", and a client that showed a wait timer for the
+      // second would be promising a potion that is never coming back.
+      const uses = chargesLeft(actor, chosen);
+      if (uses !== null && uses <= 0) {
+        throw new EncounterError(
+          'POWER_OUT_OF_CHARGES',
+          `"${chosen.name}" has no uses left in this dungeon`,
+        );
+      }
       startTurn(actor);
 
       if (chosen.kind === 'attack') {
@@ -595,6 +834,11 @@ export function runEncounter(
 
     turns.push(resolveTurn(seed, turnNumber, actor, chosen, target));
     if (chosen.cooldown > 0) actor.cooldowns[chosen.id] = chosen.cooldown;
+    // Spent only once the turn has actually resolved. Decrementing above the
+    // push would charge the player for a turn that threw on its way out.
+    if (chosen.charges !== null) {
+      actor.charges[chosen.id] = (actor.charges[chosen.id] ?? 0) - 1;
+    }
     turnNumber++;
   }
 

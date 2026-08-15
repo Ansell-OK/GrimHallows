@@ -36,6 +36,15 @@ import {
   type CombatantView,
   type EncounterView,
 } from '@grimhallow/shared';
+import {
+  describeTurn,
+  firstPhase,
+  healGain,
+  needsTarget,
+  nextPhase,
+  powerBadge,
+  type Phase,
+} from '@/lib/turnPresentation';
 import combatBg from '@/assets/images/combat_bg_1785807769665.jpg';
 
 import imgVoidRevenant from '@/assets/images/char_void_revenant_1785808799517.jpg';
@@ -53,6 +62,8 @@ const ATTACK_MS = 1600;
 const DAMAGE_MS = 1600;
 /** A turn with no dice at all — a Guard, or an attack that had nothing to roll. */
 const QUIET_MS = 700;
+/** How long a heal's restored HP stays up before the turn is committed to the log. */
+const HEAL_MS = 1600;
 
 /**
  * Portraits, chosen by position purely so the same combatant keeps the same
@@ -65,18 +76,6 @@ function portrait(c: CombatantView, index: number): string {
   return c.side === 'party' ? imgVoidRevenant : MONSTER_ART[index % MONSTER_ART.length];
 }
 
-/** Which roll a turn shows first. Guard rolls nothing, so it shows neither. */
-type Phase = 'attack' | 'damage' | 'quiet';
-
-function firstPhase(turn: CombatTurn): Phase {
-  if (turn.rolls.attackDice?.length) return 'attack';
-  if (turn.rolls.damageDice?.length) return 'damage';
-  return 'quiet';
-}
-
-function nextPhase(turn: CombatTurn, phase: Phase): Phase | null {
-  return phase === 'attack' && turn.rolls.damageDice?.length ? 'damage' : null;
-}
 
 /**
  * The flat bonus that turned the die faces into the roll.
@@ -90,17 +89,24 @@ function modifier(faces: readonly number[] | undefined, total: number | undefine
   return total - faces.reduce((sum, f) => sum + f, 0);
 }
 
-/** One line of combat log, from the turn the server logged. */
-function describe(turn: CombatTurn): string {
-  if (turn.action === 'guard') {
-    return `${turn.actorName} braces.`;
-  }
-  const target = turn.targetName ?? 'nothing';
-  if (turn.rolls.hit === false) {
-    return `${turn.actorName} attacks ${target} — ${turn.rolls.attackRoll} vs DC ${turn.rolls.targetDc}. Miss.`;
-  }
-  const defeated = turn.defeated ? ` ${target} falls.` : '';
-  return `${turn.actorName} hits ${target} for ${turn.damageDealt}.${defeated}`;
+
+/**
+ * The HP a combatant's bar was showing before the turn now resolving.
+ *
+ * Read from the `shownHp` mirror rather than by walking the log, because the log
+ * is not in the animation effect's dependency list and reading it there would
+ * close over a stale copy. The mirror is exact for this purpose: `setShownHp` for
+ * the current turn has been queued but not yet rendered when this runs, so the
+ * ref still holds the previous value. Falls back to the post-turn HP, which
+ * yields a gain of zero and no float — the right answer when there is no earlier
+ * state to compare against.
+ */
+function hpBeforeTurn(
+  shown: Readonly<Record<string, number>>,
+  targetId: string,
+  fallback: number,
+): number {
+  return shown[targetId] ?? fallback;
 }
 
 export default function Combat() {
@@ -124,6 +130,8 @@ export default function Combat() {
     id: number;
     amount: number;
     targetId: string;
+    /** A heal float is green and prefixed `+`; a damage float is red `-`. */
+    heal?: boolean;
   } | null>(null);
   const floatId = useRef(0);
 
@@ -137,6 +145,20 @@ export default function Combat() {
    * the authoritative view.
    */
   const [shownHp, setShownHp] = useState<Readonly<Record<string, number>>>({});
+
+  /**
+   * `shownHp` as the animation currently has it, readable inside the turn timer.
+   *
+   * The timer effect depends on `showing` alone — adding `shownHp` to its deps
+   * would restart the countdown every time a bar moved, so a turn would never
+   * finish animating. A heal still needs the pre-turn HP to know how much was
+   * actually gained after the clamp, so it is mirrored here and read before the
+   * update rather than closed over.
+   */
+  const shownHpRef = useRef<Readonly<Record<string, number>>>({});
+  useEffect(() => {
+    shownHpRef.current = shownHp;
+  }, [shownHp]);
 
   const [targetId, setTargetId] = useState<string | null>(null);
 
@@ -184,7 +206,7 @@ export default function Combat() {
     if (!showing) return;
     const { turn, phase } = showing;
     const after = nextPhase(turn, phase);
-    const delay = phase === 'attack' ? ATTACK_MS : phase === 'damage' ? DAMAGE_MS : QUIET_MS;
+    const delay = phase === 'attack' ? ATTACK_MS : phase === 'damage' ? DAMAGE_MS : phase === 'heal' ? HEAL_MS : QUIET_MS;
 
     const timer = setTimeout(() => {
       if (after) {
@@ -199,6 +221,18 @@ export default function Combat() {
       if (turn.damageDealt > 0 && turn.targetId) {
         floatId.current += 1;
         setFloating({ id: floatId.current, amount: turn.damageDealt, targetId: turn.targetId });
+      }
+      // The HP actually gained, not the roll — a clamped heal must float the
+      // smaller number, or a player at full health sees +7 above a bar that did
+      // not move. Suppressed entirely at zero, since a wasted sip floating "+0"
+      // reads as a bug rather than as an overheal.
+      if (turn.action === 'heal' && turn.targetId && turn.targetHpAfter !== null) {
+        const { targetId: drinker, targetHpAfter: hp } = turn;
+        const gained = healGain(turn, shownHpRef.current[drinker] ?? hp);
+        if (gained > 0) {
+          floatId.current += 1;
+          setFloating({ id: floatId.current, amount: gained, targetId: drinker, heal: true });
+        }
       }
       setShowing(null);
     }, delay);
@@ -235,10 +269,11 @@ export default function Combat() {
   const act = async (powerId: string) => {
     if (!run || !myTurn || busy) return;
     const power = me?.powers.find((p) => p.id === powerId);
-    // Guard has no target; an attack without a living one has nothing to hit,
-    // and the server would refuse it — but this way the button is simply off.
-    const target = power?.kind === 'guard' ? null : effectiveTarget?.id ?? null;
-    if (power?.kind !== 'guard' && !target) return;
+    // Guard braces and a heal is self-only; only an attack needs something to
+    // hit, and an attack with nothing living to hit would be refused by the
+    // server — but this way the button is simply off.
+    const target = needsTarget(power?.kind) ? effectiveTarget?.id ?? null : null;
+    if (needsTarget(power?.kind) && !target) return;
 
     setSubmitting(true);
     setError(null);
@@ -334,6 +369,8 @@ export default function Combat() {
   const damageDice = turn?.rolls.damageDice ?? [];
   const attackMod = modifier(attackDice, turn?.rolls.attackRoll);
   const damageMod = modifier(damageDice, turn?.rolls.damageRoll);
+  const healDice = turn?.rolls.healDice ?? [];
+  const healMod = modifier(healDice, turn?.rolls.healRoll);
 
   return (
     <div className="relative w-full h-full flex flex-col bg-obsidian overflow-hidden">
@@ -392,9 +429,11 @@ export default function Combat() {
                       animate={{ opacity: 1, y: -40, scale: 1.5 }}
                       exit={{ opacity: 0, y: -60 }}
                       onAnimationComplete={() => setFloating(null)}
-                      className="absolute inset-0 flex items-center justify-center z-50 pointer-events-none text-blood font-display text-4xl drop-shadow-[0_0_10px_rgba(255,0,0,1)]"
+                      className={`absolute inset-0 flex items-center justify-center z-50 pointer-events-none font-display text-4xl drop-shadow-[0_0_10px_rgba(255,0,0,1)] ${
+                        floating.heal ? 'text-emerald-400' : 'text-blood'
+                      }`}
                     >
-                      -{floating.amount}
+                      {floating.heal ? `+${floating.amount}` : `-${floating.amount}`}
                     </motion.div>
                   )}
                 </AnimatePresence>
@@ -416,8 +455,16 @@ export default function Combat() {
             <div className="space-y-2">
               {(me?.powers ?? []).map((power) => {
                 const cooling = me?.cooldowns[power.id] ?? 0;
-                const needsTarget = power.kind !== 'guard';
-                const disabled = busy || !myTurn || cooling > 0 || (needsTarget && !effectiveTarget);
+                const uses = me?.charges[power.id] ?? null;
+                // A drained potion is off for good, which is why this is `=== 0`
+                // and not `<= 0`: `charges` omits every unlimited power, so
+                // `null` here means "no limit" and must not read as empty.
+                const disabled =
+                  busy ||
+                  !myTurn ||
+                  cooling > 0 ||
+                  uses === 0 ||
+                  (needsTarget(power.kind) && !effectiveTarget);
                 return (
                   <button
                     key={power.id}
@@ -430,14 +477,20 @@ export default function Combat() {
                   >
                     <div
                       className={`w-6 h-6 mr-3 shrink-0 border ${
-                        power.id === GUARD_POWER_ID
-                          ? 'bg-blue-500/20 border-blue-500/50'
-                          : 'bg-void/20 border-void/50'
+                        power.kind === 'heal'
+                          ? 'bg-emerald-500/20 border-emerald-500/50'
+                          : power.id === GUARD_POWER_ID
+                            ? 'bg-blue-500/20 border-blue-500/50'
+                            : 'bg-void/20 border-void/50'
                       }`}
                     />
                     <span className="text-sm font-ui text-gray-300 flex-1">{power.name}</span>
-                    <span className="text-[10px] font-ui text-gray-500">
-                      {cooling > 0 ? `${cooling}t` : power.diceFormula ?? '—'}
+                    <span
+                      className={`text-[10px] font-ui ${
+                        uses === 0 ? 'text-gray-600' : uses !== null ? 'text-emerald-400/80' : 'text-gray-500'
+                      }`}
+                    >
+                      {powerBadge(power, cooling, uses)}
                     </span>
                   </button>
                 );
@@ -512,6 +565,43 @@ export default function Combat() {
                   </motion.div>
                 )}
 
+                {showing?.phase === 'heal' && turn && (
+                  <motion.div
+                    key={`heal-${turn.turnNumber}`}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.8 }}
+                    className="flex flex-col items-center"
+                  >
+                    <div className="text-xs font-ui tracking-widest text-gray-500 uppercase mb-4">
+                      Healing Roll
+                    </div>
+                    <div className="flex items-center space-x-4 mb-4 text-gray-400 font-display text-xl">
+                      {healDice.map((face, i) => (
+                        <React.Fragment key={i}>
+                          {i > 0 && <span>+</span>}
+                          <Dice
+                            type="d6"
+                            target={face}
+                            sides={dieSize(combatants, turn.actorId, turn.powerId, healDice)}
+                            isRolling
+                            className="w-16 h-16 text-emerald-400"
+                          />
+                        </React.Fragment>
+                      ))}
+                      {healMod !== 0 && (
+                        <>
+                          <span>+</span>
+                          <span className="text-emerald-400">{healMod}</span>
+                        </>
+                      )}
+                    </div>
+                    <div className="text-xl font-display text-emerald-400">
+                      {turn.rolls.healRoll} Restored
+                    </div>
+                  </motion.div>
+                )}
+
                 {showing?.phase === 'quiet' && turn && (
                   <motion.div
                     key={`quiet-${turn.turnNumber}`}
@@ -520,7 +610,7 @@ export default function Combat() {
                     exit={{ opacity: 0 }}
                     className="font-display text-xl text-gray-400"
                   >
-                    {describe(turn)}
+                    {describeTurn(turn)}
                   </motion.div>
                 )}
 
@@ -625,7 +715,7 @@ export default function Combat() {
               key={`${entry.turnNumber}-${i}`}
               className={`mb-1 ${entry.actorAddress ? 'text-gray-300' : 'text-gray-500'}`}
             >
-              {describe(entry)}
+              {describeTurn(entry)}
             </div>
           ))}
           {log.length === 0 && (

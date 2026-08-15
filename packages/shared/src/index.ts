@@ -17,6 +17,7 @@ export * from './rarity.js';
 export * from './stats.js';
 export * from './powers.js';
 export * from './powerUps.js';
+export * from './lootArchetypes.js';
 export * from './monsters.js';
 export * from './encounter.js';
 export * from './leaderboard.js';

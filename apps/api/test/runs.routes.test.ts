@@ -26,12 +26,14 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { Response as InjectResponse } from 'light-my-request';
+import type { StoredEncounterSetup } from '@grimhallow/shared';
 import {
   DICE_ALGO_VERSION,
   ENCOUNTER_ALGO_VERSION,
   EncounterError,
   MAX_TURNS,
   STATS_ALGO_VERSION,
+  normalizeStoredSetup,
   resolveFreeRunReward,
   runEncounter,
 } from '@grimhallow/shared';
@@ -656,7 +658,22 @@ describe('combat loop', () => {
       expect(v.setup).not.toBeNull();
       expect(v.actions.length).toBe((await runs.listActions(run.runId)).length);
 
-      const { turns, view: encounter } = runEncounter(v.seed, v.setup, v.actions);
+      // `normalizeStoredSetup` is the one call between the published bytes and
+      // a runnable setup, and it is deliberately visible here rather than done
+      // for the player upstream. What we publish is the row the transcript hash
+      // was taken over, which for a run committed before archetypes spells its
+      // loadout `powerUpTiers` — a shape the engine does not accept. Publishing
+      // the normalized form instead would make this line unnecessary and the
+      // hash beside it uncheckable. This run is a modern one, so the call is a
+      // no-op; it is written anyway because the published contract says a
+      // verifier makes it, and a test that skipped it would stop proving the
+      // documented path works.
+      // Cast because the response is read as JSON and so is untyped here. The
+      // type asserted is the one `VerificationData` declares for the field —
+      // which is the point of the cast: if that declaration stops being the
+      // stored shape, this line is where a verifier's assumption breaks.
+      const setup = normalizeStoredSetup(v.setup as StoredEncounterSetup);
+      const { turns, view: encounter } = runEncounter(v.seed, setup, v.actions);
 
       expect(encounter.outcome).toBe(view.combatOutcome);
       expect(turns).toEqual(view.turns);
@@ -689,7 +706,11 @@ describe('combat loop', () => {
       // depends on the seed.
       let replayed: unknown = null;
       try {
-        replayed = runEncounter('a'.repeat(64), v.setup, v.actions).turns;
+        replayed = runEncounter(
+          'a'.repeat(64),
+          normalizeStoredSetup(v.setup as StoredEncounterSetup),
+          v.actions,
+        ).turns;
       } catch (err) {
         expect(err).toBeInstanceOf(EncounterError);
       }

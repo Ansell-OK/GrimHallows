@@ -8,11 +8,13 @@
  * verification page) reads that frozen list, so this widget is where a run's
  * strength is decided.
  *
- * WHAT IS SENT IS TOKEN IDS, NEVER TIERS. Each card shows a tier because the
- * backend told us one, but the backend re-reads every tier from
- * `get-token-tier` at entry, after confirming the wallet still holds the token.
- * If this component sent a tier it would be sending a number the server must
- * ignore — so it doesn't send one.
+ * WHAT IS SENT IS TOKEN IDS, NEVER TIERS OR ARCHETYPES. Each card shows both
+ * because the backend told us both, but the backend re-reads them at entry —
+ * the tier from `get-token-tier`, the archetype from the uri `get-token-uri`
+ * returns — after confirming the wallet still holds the token. If this component
+ * sent either it would be sending a number the server must ignore, so it doesn't
+ * send one. `dungeons.routes.test.ts` pins that: a request naming a token *and*
+ * claiming a tier and archetype for it is rejected outright.
  *
  * Selection is allowed to be empty. Entering bare is a normal thing to do, and
  * the empty loadout is the exact case that replays byte-identically to a
@@ -22,22 +24,7 @@
 import React from 'react';
 import { MAX_EQUIPPED_POWER_UPS } from '@grimhallow/shared';
 import type { EquippablePowerUp } from '@/lib/api';
-
-/** Tailwind accents, matching the rarity colours used on the forge and inventory. */
-function tierAccent(tier: number): string {
-  if (tier >= 4) return 'text-gold';
-  if (tier === 3) return 'text-blood';
-  if (tier === 2) return 'text-void';
-  return 'text-blue-400';
-}
-
-function tierBorder(tier: number, selected: boolean): string {
-  if (!selected) return 'border-stone';
-  if (tier >= 4) return 'border-gold';
-  if (tier === 3) return 'border-blood';
-  if (tier === 2) return 'border-void';
-  return 'border-blue-400';
-}
+import { tierAccent, tierBorder } from '@/lib/tierStyle';
 
 export interface LoadoutPickerProps {
   readonly items: readonly EquippablePowerUp[];
@@ -110,7 +97,7 @@ export function LoadoutPicker({
                   type="button"
                   disabled={blocked}
                   onClick={() => onToggle(item.tokenId)}
-                  title={item.summary}
+                  title={`${item.name} — ${item.summary}`}
                   className={`px-3 py-2 border bg-stone/30 text-left transition-colors ${tierBorder(
                     item.tier,
                     isSelected,
@@ -120,10 +107,15 @@ export function LoadoutPicker({
                       : 'cursor-pointer hover:border-gray-400'
                   }`}
                 >
+                  {/* The item's name, not its tier name. Which three you field
+                      is an archetype decision now — two tier-4s can be a +9
+                      damage sword and a +30 HP chestplate — so a card reading
+                      "T4 Legendary" twice would hide the only thing worth
+                      choosing between. */}
                   <div className={`font-display text-sm ${tierAccent(item.tier)}`}>
-                    T{item.tier} {item.tierName}
+                    {item.name}
                   </div>
-                  <div className="font-ui text-[10px] text-gray-500">#{item.tokenId}</div>
+                  <div className="font-ui text-[10px] text-gray-500">{item.summary}</div>
                 </button>
               );
             })}
@@ -142,7 +134,7 @@ export function LoadoutPicker({
                 .filter((i) => selected.includes(i.tokenId))
                 .map((i) => (
                   <li key={i.tokenId} className="font-ui text-[10px] text-gray-500">
-                    <span className={tierAccent(i.tier)}>#{i.tokenId}</span> — {i.summary}
+                    <span className={tierAccent(i.tier)}>{i.name}</span> — {i.summary}
                   </li>
                 ))}
             </ul>

@@ -25,6 +25,7 @@ import {
   lootUriForTier,
   type ActionResponse,
   type EncounterSetup,
+  type EquippedItem,
   type LootMintStatus,
   type PlayerAction,
   type RewardResult,
@@ -90,17 +91,19 @@ export class CombatService {
    * rebuilding the setup later would replay a different fight from the one the
    * player actually played.
    *
-   * `powerUpTiers` is the equipped set, frozen at entry. Each tier grants a
-   * dice-formula upgrade and defense bonus, and the list is persisted in the
-   * setup so a verifier can reproduce the exact damage rolls this character
-   * dealt — `applyPowerUps(base, tiers)` is deterministic, but only if you know
-   * which tiers were active.
+   * `powerUpItems` is the equipped set, frozen at entry. Each item grants a
+   * dice-formula upgrade, a defense bonus and — since archetypes — a max-HP
+   * bonus and possibly a granted power, and the list is persisted in the setup
+   * so a verifier can reproduce the exact damage rolls this character dealt.
+   * `applyPowerUps(base, items)` is deterministic, but only if you know which
+   * items were active, which now means both halves of each one: a tier alone
+   * stopped being a complete description of an item when archetypes landed.
    */
   async buildSetup(
     run: RunRecord,
     monsterTableId: string,
     character: CharacterRef,
-    powerUpTiers: readonly number[],
+    powerUpItems: readonly EquippedItem[],
     displayName?: string,
   ): Promise<EncounterSetup> {
     const metadata = await this.deps.chain
@@ -154,7 +157,7 @@ export class CombatService {
           name: displayName?.trim() || metadata?.name?.trim() || `Character #${character.tokenId}`,
           charClass: derived.classId,
           stats: derived.stats,
-          powerUpTiers,
+          powerUpItems,
         },
       ],
     };
@@ -223,7 +226,14 @@ export function toVerification(view: RunView): VerificationData {
     diceAlgoVersion: DICE_ALGO_VERSION,
     encounterAlgoVersion: ENCOUNTER_ALGO_VERSION,
     statsAlgoVersion: STATS_ALGO_VERSION,
-    setup: run.setup,
+    // The row's own bytes, not the normalized reading of them, because the hash
+    // published one field up was taken over these. Publishing the normalized
+    // form beside a hash of the stored form would hand a verifier two values
+    // that cannot both be right, and the one they'd recompute is the one that
+    // disagrees with our signature. `normalizeStoredSetup` in `shared` is the
+    // declared way to turn this into something `runEncounter` accepts — and for
+    // every run committed since archetypes landed it is a no-op.
+    setup: run.storedSetup,
     actions,
   };
 }
