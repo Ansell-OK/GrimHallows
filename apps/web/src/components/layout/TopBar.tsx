@@ -1,21 +1,33 @@
 import React from 'react';
-import { Mail, Bell, Settings, CircleUserRound } from 'lucide-react';
+import { Mail, Bell, Settings, CircleUserRound, Check } from 'lucide-react';
 import { motion } from 'motion/react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { cn } from '@/lib/utils';
 import { useWallet } from '@/lib/wallet';
-import { getProfile, type ProfileResponse } from '@/lib/api';
+import { getNotifications, getNotificationUnreadCount, getProfile, markAllNotificationsRead, markNotificationRead, type NotificationRecord, type ProfileResponse } from '@/lib/api';
 
 export function TopBar() {
   const navigate = useNavigate();
   const location = useLocation();
   const { address } = useWallet();
   const [profile, setProfile] = React.useState<ProfileResponse | null>(null);
+  const [notifications, setNotifications] = React.useState<NotificationRecord[]>([]);
+  const [unreadCount, setUnreadCount] = React.useState(0);
+  const [notificationsOpen, setNotificationsOpen] = React.useState(false);
 
   React.useEffect(() => {
     if (!address) { setProfile(null); return; }
     const controller = new AbortController();
     getProfile(controller.signal).then(setProfile).catch(() => undefined);
+    return () => controller.abort();
+  }, [address]);
+
+  React.useEffect(() => {
+    if (!address) { setNotifications([]); setUnreadCount(0); return; }
+    const controller = new AbortController();
+    Promise.all([getNotifications(controller.signal), getNotificationUnreadCount(controller.signal)])
+      .then(([list, count]) => { setNotifications(list.notifications); setUnreadCount(count.unreadCount); })
+      .catch(() => undefined);
     return () => controller.abort();
   }, [address]);
 
@@ -92,8 +104,9 @@ export function TopBar() {
         <motion.button whileHover={{ scale: 1.1, color: '#fff' }} className="p-2 border border-transparent hover:border-gray-700 hover:bg-stone rounded-sm">
           <Mail size={18} />
         </motion.button>
-        <motion.button whileHover={{ scale: 1.1, color: '#fff' }} className="p-2 border border-transparent hover:border-gray-700 hover:bg-stone rounded-sm">
+        <motion.button whileHover={{ scale: 1.1, color: '#fff' }} className="relative p-2 border border-transparent hover:border-gray-700 hover:bg-stone rounded-sm" aria-label="Notifications" onClick={() => setNotificationsOpen((open) => !open)}>
           <Bell size={18} />
+          {unreadCount > 0 && <span className="absolute -right-1 -top-1 min-w-4 h-4 px-1 rounded-full bg-blood text-[10px] text-white leading-4">{unreadCount > 99 ? '99+' : unreadCount}</span>}
         </motion.button>
         <motion.button 
           whileHover={{ scale: 1.1, color: '#fff' }} 
@@ -103,6 +116,21 @@ export function TopBar() {
           <Settings size={18} />
         </motion.button>
       </div>
+
+      {notificationsOpen && address && (
+        <div className="absolute right-8 top-14 w-80 max-w-[calc(100vw-2rem)] border border-stone bg-obsidian shadow-xl p-3 z-50" role="dialog" aria-label="Notifications">
+          <div className="flex items-center justify-between border-b border-stone pb-2 mb-2">
+            <span className="text-xs uppercase tracking-widest text-gray-400">Notifications</span>
+            {unreadCount > 0 && <button className="text-[10px] text-gray-400 hover:text-white" onClick={() => markAllNotificationsRead().then(() => { setUnreadCount(0); setNotifications((items) => items.map((item) => ({ ...item, read: true }))); })}>Mark all read</button>}
+          </div>
+          {notifications.length === 0 ? <div className="py-5 text-center text-sm text-gray-500">No notifications</div> : <div className="max-h-72 overflow-y-auto space-y-1">
+            {notifications.map((item) => <button key={item.id} className={`w-full text-left p-2 flex gap-2 ${item.read ? 'opacity-60' : 'bg-stone/20'}`} onClick={() => !item.read && markNotificationRead(item.id).then(() => { setUnreadCount((count) => Math.max(0, count - 1)); setNotifications((items) => items.map((entry) => entry.id === item.id ? { ...entry, read: true } : entry)); })}>
+              {item.read ? <Check size={14} className="mt-0.5 text-gray-500" /> : <Bell size={14} className="mt-0.5 text-stx-accent" />}
+              <span className="text-xs text-gray-300">{item.type.replaceAll('_', ' ')}</span>
+            </button>)}
+          </div>}
+        </div>
+      )}
       
     </div>
   );

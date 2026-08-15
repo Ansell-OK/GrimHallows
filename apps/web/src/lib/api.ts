@@ -179,6 +179,31 @@ export function getProfile(signal?: AbortSignal): Promise<ProfileResponse> {
   return request('/profile', { signal });
 }
 
+export interface NotificationRecord {
+  readonly id: string;
+  readonly address: string;
+  readonly type: string;
+  readonly payload: Record<string, unknown>;
+  readonly read: boolean;
+  readonly createdAt: string;
+}
+
+export function getNotifications(signal?: AbortSignal): Promise<{ notifications: NotificationRecord[] }> {
+  return request('/notifications', { signal });
+}
+
+export function getNotificationUnreadCount(signal?: AbortSignal): Promise<{ unreadCount: number }> {
+  return request('/notifications/unread-count', { signal });
+}
+
+export function markNotificationRead(id: string): Promise<{ read: boolean }> {
+  return request(`/notifications/${encodeURIComponent(id)}/read`, { method: 'PATCH' });
+}
+
+export function markAllNotificationsRead(): Promise<{ markedRead: number }> {
+  return request('/notifications/read-all', { method: 'POST' });
+}
+
 // ---------------------------------------------------------------------------
 // Power-ups — 04-backend-api-spec.md#2
 // ---------------------------------------------------------------------------
