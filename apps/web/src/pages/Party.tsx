@@ -11,6 +11,7 @@ import {
   getPartyInvites,
   kickPartyMember,
   leaveParty,
+  preparePartyEntry,
   respondPartyInvite,
   setPartyCharacter,
   setPartyReady,
@@ -28,6 +29,7 @@ export default function Party() {
   const [invitee, setInvitee] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [entryPrepared, setEntryPrepared] = useState(false);
   const [characters, setCharacters] = useState<
     readonly {
       contractId: string;
@@ -69,6 +71,12 @@ export default function Party() {
     } finally {
       setBusy(false);
     }
+  };
+  const prepare = async () => {
+    setBusy(true);
+    try { await preparePartyEntry(party!.id); setEntryPrepared(true); setError(null); }
+    catch (err) { setEntryPrepared(false); setError(errorMessage(err)); }
+    finally { setBusy(false); }
   };
   if (status !== "connected" || !address)
     return (
@@ -281,6 +289,12 @@ export default function Party() {
                   </Button>
                 </form>
               ) : null}
+              {leader ? (
+                <Button className="w-full mb-3" size="sm" variant="stx" disabled={busy} onClick={prepare}>
+                  Validate Entry
+                </Button>
+              ) : null}
+              {entryPrepared ? <p className="mb-3 text-xs font-ui text-rot">Party snapshot validated. Free party combat integration is next; no run or payment has been created.</p> : null}
               <Button
                 className="w-full"
                 size="sm"

@@ -290,6 +290,9 @@ export function respondPartyInvite(
     body: { accept },
   });
 }
+export function preparePartyEntry(id: string): Promise<{ partyId: string; members: readonly { address: string; character: { contractId: string; tokenId: string } }[] }> {
+  return request(`/parties/${encodeURIComponent(id)}/prepare-entry`, { method: "POST" });
+}
 
 export function getNotificationUnreadCount(
   signal?: AbortSignal,
