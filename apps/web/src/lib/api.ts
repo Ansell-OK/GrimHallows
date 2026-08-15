@@ -192,6 +192,17 @@ export function getNotifications(signal?: AbortSignal): Promise<{ notifications:
   return request('/notifications', { signal });
 }
 
+export interface PartyMemberRecord { readonly address: string; readonly role: 'leader' | 'member'; readonly ready: boolean; readonly nftContractId: string | null; readonly nftTokenId: string | null; }
+export interface PartyRecord { readonly id: string; readonly inviteCode: string; readonly createdBy: string; readonly members: readonly PartyMemberRecord[]; }
+export interface PartyInvite { readonly id: string; readonly partyId: string; readonly inviterAddress: string; readonly expiresAt: string; }
+export function getCurrentParty(): Promise<{ party: PartyRecord | null }> { return request('/parties/current'); }
+export function createParty(): Promise<{ party: PartyRecord }> { return request('/parties', { method: 'POST' }); }
+export function leaveParty(id: string): Promise<{ outcome: string }> { return request(`/parties/${encodeURIComponent(id)}/leave`, { method: 'POST' }); }
+export function setPartyReady(id: string, ready: boolean): Promise<{ ready: boolean }> { return request(`/parties/${encodeURIComponent(id)}/ready`, { method: 'POST', body: { ready } }); }
+export function createPartyInvite(id: string, address: string): Promise<{ invite: PartyInvite }> { return request(`/parties/${encodeURIComponent(id)}/invites`, { method: 'POST', body: { address } }); }
+export function getPartyInvites(): Promise<{ invites: PartyInvite[] }> { return request('/party-invites'); }
+export function respondPartyInvite(id: string, accept: boolean): Promise<{ outcome: string }> { return request(`/party-invites/${encodeURIComponent(id)}/respond`, { method: 'POST', body: { accept } }); }
+
 export function getNotificationUnreadCount(signal?: AbortSignal): Promise<{ unreadCount: number }> {
   return request('/notifications/unread-count', { signal });
 }

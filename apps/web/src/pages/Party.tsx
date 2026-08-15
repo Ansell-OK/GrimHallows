@@ -1,182 +1,32 @@
-import React from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { TopBar } from '@/components/layout/TopBar';
-import { CharacterCard, Rarity, CharClass } from '@/components/ui/CharacterCard';
 import { Button } from '@/components/ui/Button';
-import { TransactionOverlay, TxState } from '@/components/ui/TransactionOverlay';
-import { CheckCircle2, MessageSquare } from 'lucide-react';
+import { useWallet } from '@/lib/wallet';
+import { createParty, createPartyInvite, errorMessage, getCurrentParty, getPartyInvites, leaveParty, respondPartyInvite, setPartyReady, type PartyInvite, type PartyRecord } from '@/lib/api';
 
-import imgVoidRevenant from '@/assets/images/char_void_revenant_1785808799517.jpg';
-import imgIronTemplar from '@/assets/images/char_iron_templar_1785808812709.jpg';
-import imgShadowLurker from '@/assets/images/char_shadow_lurker_1785808824826.jpg';
-import imgWardenOfAsh from '@/assets/images/char_warden_of_ash_1785808834991.jpg';
-import imgPartyLeaderCrown from '@/assets/images/misc_party_leader_crown_1785809436630.jpg';
-
-/**
- * Placeholder party, pending the party API (Phase 8).
- *
- * The names are NFT display names, not class names — a token is called whatever
- * its collection called it, and its class comes from the collection's contract
- * principal (`SUPPORTED_CLASS_CONTRACTS`). They are paired to match the class
- * table in 01-game-design.md#4a rather than the archetype names they were
- * written against, so the card art, the class badge, and the stat emphasis agree:
- * Warrior leads on STR/VIT, Rogue on AGI, Mage on INT, Paladin on VIT/INT.
- */
-const PARTY_MEMBERS = [
-  {
-    id: '1',
-    player: 'Arcanist#9172',
-    isLeader: true,
-    isReady: true,
-    character: {
-      id: 'c1', name: 'Void Revenant', tokenId: '1023', image: imgVoidRevenant, rarity: 'epic' as Rarity,
-      charClass: 'mage' as CharClass,
-      stats: { hp: 108, str: 12, agi: 17, int: 31, vit: 16 }
-    }
-  },
-  {
-    id: '2',
-    player: 'Stonebreaker#2211',
-    isLeader: false,
-    isReady: true,
-    character: {
-      id: 'c2', name: 'Iron Templar', tokenId: '7781', image: imgIronTemplar, rarity: 'legendary' as Rarity,
-      charClass: 'warrior' as CharClass,
-      stats: { hp: 148, str: 29, agi: 18, int: 12, vit: 27 }
-    }
-  },
-  {
-    id: '3',
-    player: 'Nyx#8644',
-    isLeader: false,
-    isReady: true,
-    character: {
-      id: 'c3', name: 'Shadow Lurker', tokenId: '5552', image: imgShadowLurker, rarity: 'rare' as Rarity,
-      charClass: 'rogue' as CharClass,
-      stats: { hp: 98, str: 19, agi: 32, int: 15, vit: 17 }
-    }
-  },
-  {
-    id: '4',
-    player: 'Grim#4450',
-    isLeader: false,
-    isReady: true,
-    character: {
-      id: 'c4', name: 'Warden of Ash', tokenId: '3301', image: imgWardenOfAsh, rarity: 'mythic' as Rarity,
-      charClass: 'paladin' as CharClass,
-      stats: { hp: 172, str: 22, agi: 15, int: 21, vit: 32 }
-    }
-  }
-];
+const shortAddress = (address: string) => `${address.slice(0, 6)}...${address.slice(-4)}`;
 
 export default function Party() {
-  const [txState, setTxState] = React.useState<TxState>('idle');
-
-  const handleEnterDungeon = () => {
-    setTxState('failed');
-  };
-
-  return (
-    <div className="relative w-full h-full flex flex-col bg-obsidian">
-      <TopBar />
-      {/*
-        Party runs are not enabled: the backend answers PARTY_RUNS_NOT_ENABLED
-        for any entry carrying a partyId. The overlay is wired to say so rather
-        than to simulate a signature and a payment — a mock that renders
-        "Payment Confirmed" for a transaction that never existed is the exact
-        shape of screen that teaches a player to trust one that isn't real.
-        Solo paid entry, which is live, runs through Map.tsx.
-      */}
-      <TransactionOverlay
-        txState={txState}
-        title="Enter The Obsidian Spire"
-        amountStx="—"
-        error={
-          'Party runs are not enabled yet. Enter the spire solo from the world map ' +
-          'in the meantime — nothing has been charged.'
-        }
-        onCancel={() => setTxState('idle')}
-        onSign={() => setTxState('failed')}
-        onRetry={() => setTxState('idle')}
-      />
-
-      <div className="flex-1 pt-24 px-12 pb-12 flex space-x-8 max-w-[1600px] mx-auto w-full">
-        
-        {/* Left Panel */}
-        <div className="w-64 flex flex-col justify-between">
-          <div>
-            <h2 className="text-sm font-ui tracking-[0.2em] text-gray-400 uppercase mb-4">Party</h2>
-            <div className="text-2xl font-display text-gray-200 mb-6">Spire Hunters</div>
-            
-            <div className="space-y-2 text-sm font-ui text-gray-400 mb-8">
-              <div className="flex justify-between"><span>Party ID</span> <span className="text-gray-200">67F3A</span></div>
-              <div className="flex justify-between"><span>Privacy</span> <span className="text-gray-200">Open</span></div>
-            </div>
-            
-            <div className="space-y-4">
-              <Button variant="secondary" className="w-full">Invite Player</Button>
-              <Button variant="danger" className="w-full">Leave Party</Button>
-            </div>
-          </div>
-          
-          {/* Party Chat */}
-          <div className="flex-1 min-h-0 mt-8 flex flex-col border border-stone bg-obsidian/50">
-            <div className="p-3 border-b border-stone text-xs font-ui tracking-widest uppercase text-gray-500">Party Chat</div>
-            <div className="flex-1 p-4 overflow-y-auto space-y-4 text-xs font-ui">
-              <div className="flex space-x-2">
-                <MessageSquare size={14} className="text-gray-500 mt-0.5" />
-                <div>
-                  <span className="text-gray-400 font-medium">Nyx#8644</span>
-                  <p className="text-gray-300">Ready when you are.</p>
-                </div>
-              </div>
-              <div className="flex space-x-2">
-                <MessageSquare size={14} className="text-gray-500 mt-0.5" />
-                <div>
-                  <span className="text-gray-400 font-medium">Grim#4450</span>
-                  <p className="text-gray-300">Let's claim that spire.</p>
-                </div>
-              </div>
-              <div className="flex space-x-2">
-                <MessageSquare size={14} className="text-void mt-0.5" />
-                <div>
-                  <span className="text-void font-medium">Arcanist#9172</span>
-                  <p className="text-gray-300">Pool is looking good today.</p>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Center Panel */}
-        <div className="flex-1 flex flex-col items-center justify-center">
-          <div className="flex justify-center space-x-6 mb-16">
-            {PARTY_MEMBERS.map(member => (
-              <div key={member.id} className="flex flex-col items-center">
-                <div className="mb-4 text-center flex flex-col items-center h-12">
-                  <div className="text-sm font-ui text-gray-200">{member.player}</div>
-                  {member.isLeader && <img src={imgPartyLeaderCrown} className="w-5 h-5 mt-1 object-contain" alt="Leader" />}
-                </div>
-                <CharacterCard character={member.character} compact />
-              </div>
-            ))}
-          </div>
-
-          <div className="flex flex-col items-center">
-            <div className="flex items-center space-x-4 mb-2">
-              <span className="text-sm font-ui tracking-widest text-gray-300 uppercase">Ready Check</span>
-              <div className="flex space-x-2">
-                {PARTY_MEMBERS.map(m => <CheckCircle2 key={m.id} size={20} className="text-rot" />)}
-              </div>
-            </div>
-            <div className="text-xs font-ui text-gray-500 mb-8">All members ready</div>
-            
-            <Button variant="stx" size="lg" className="w-80 flex flex-col" onClick={handleEnterDungeon}>
-              <span className="mb-1">Enter Dungeon</span>
-              <span className="text-[10px] text-obsidian/70">The Obsidian Spire (1 STX Gate Fee)</span>
-            </Button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+  const { address, status } = useWallet();
+  const [party, setParty] = useState<PartyRecord | null>(null);
+  const [invites, setInvites] = useState<PartyInvite[]>([]);
+  const [invitee, setInvitee] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    if (!address) { setParty(null); setInvites([]); return; }
+    try { const [current, pending] = await Promise.all([getCurrentParty(), getPartyInvites()]); setParty(current.party); setInvites(pending.invites); setError(null); }
+    catch (err) { setError(errorMessage(err)); }
+  }, [address]);
+  useEffect(() => { void load(); }, [load]);
+  const act = async (work: () => Promise<unknown>) => { setBusy(true); try { await work(); await load(); } catch (err) { setError(errorMessage(err)); } finally { setBusy(false); } };
+  if (status !== 'connected' || !address) return <div className="min-h-screen bg-obsidian"><TopBar /><main className="pt-32 px-6 text-center text-gray-400 font-ui">Connect a wallet to manage your party.</main></div>;
+  const self = party?.members.find((member) => member.address === address);
+  const leader = self?.role === 'leader';
+  return <div className="min-h-screen bg-obsidian"><TopBar /><main className="pt-28 px-6 pb-12 max-w-6xl mx-auto">
+    <div className="flex flex-wrap items-end justify-between gap-4 mb-8"><div><p className="text-xs font-ui tracking-widest uppercase text-gray-500">Party</p><h1 className="text-3xl font-display text-gray-100">{party ? 'Your Expedition' : 'Find An Expedition'}</h1></div>{party ? <div className="text-right font-ui text-xs text-gray-400"><div>{party.members.length}/4 members</div><div>{party.members.filter((member) => member.ready).length}/{party.members.length} ready</div></div> : null}</div>
+    {error ? <div className="mb-5 border border-blood/50 bg-blood/10 p-3 text-sm text-gray-200">{error}</div> : null}
+    {invites.length ? <section className="mb-8 border border-stone p-5"><h2 className="font-display text-lg text-gray-200 mb-4">Pending Invites</h2><div className="space-y-3">{invites.map((invite) => <div className="flex flex-wrap gap-3 items-center justify-between" key={invite.id}><span className="font-ui text-sm text-gray-300">From {shortAddress(invite.inviterAddress)}</span><span className="flex gap-2"><Button size="sm" variant="stx" disabled={busy} onClick={() => act(() => respondPartyInvite(invite.id, true))}>Accept</Button><Button size="sm" variant="secondary" disabled={busy} onClick={() => act(() => respondPartyInvite(invite.id, false))}>Decline</Button></span></div>)}</div></section> : null}
+    {!party ? <section className="border border-stone p-8 text-center"><p className="font-ui text-gray-400 mb-5">Create a party to invite up to three other players.</p><Button variant="stx" disabled={busy} onClick={() => act(createParty)}>Create Party</Button></section> : <div className="grid lg:grid-cols-[1fr_320px] gap-8"><section className="border border-stone p-6"><div className="flex justify-between gap-4 mb-5"><h2 className="font-display text-xl text-gray-200">Roster</h2><span className="font-ui text-xs text-gray-500">Code: {party.inviteCode}</span></div><div className="grid sm:grid-cols-2 gap-3">{party.members.map((member) => <div key={member.address} className="border border-stone bg-obsidian/50 p-4"><div className="flex justify-between gap-3"><span className="font-ui text-sm text-gray-200">{shortAddress(member.address)}</span><span className={member.ready ? 'text-rot text-xs font-ui' : 'text-gray-500 text-xs font-ui'}>{member.ready ? 'READY' : 'NOT READY'}</span></div><p className="mt-3 text-xs font-ui text-gray-500">{member.nftTokenId ? `Character #${member.nftTokenId}` : 'Character not selected'}</p>{member.address === address ? <Button className="mt-4 w-full" size="sm" variant={member.ready ? 'secondary' : 'stx'} disabled={busy || !member.nftTokenId} onClick={() => act(() => setPartyReady(party.id, !member.ready))}>{member.ready ? 'Unready' : 'Ready'}</Button> : null}</div>)}</div></section><aside className="border border-stone p-6 h-fit"><h2 className="font-display text-lg text-gray-200 mb-4">Actions</h2>{leader ? <form className="space-y-3 mb-5" onSubmit={(event) => { event.preventDefault(); if (invitee.trim()) void act(() => createPartyInvite(party.id, invitee.trim())); }}><input value={invitee} onChange={(event) => setInvitee(event.target.value)} placeholder="Stacks address" className="w-full bg-obsidian border border-stone p-3 text-sm text-gray-200" /><Button className="w-full" size="sm" variant="secondary" disabled={busy || !invitee.trim()}>Invite Player</Button></form> : null}<Button className="w-full" size="sm" variant="danger" disabled={busy} onClick={() => act(() => leaveParty(party.id))}>{leader ? 'Disband Party' : 'Leave Party'}</Button><p className="mt-5 text-xs font-ui leading-relaxed text-gray-500">Party dungeon entry is not enabled yet. Nothing on this screen charges your wallet.</p></aside></div>}
+  </main></div>;
 }
